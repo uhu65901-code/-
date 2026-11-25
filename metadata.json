@@ -1,0 +1,6 @@
+{
+  "name": "FlowTrend IQ",
+  "description": "โปรแกรมช่วยสแกนกราฟเทรนด์ไหล 1 นาที สำหรับ IQ Option (Binary & Digital) แจ้งเตือนสัญญาณเรียลไทม์",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
