@@ -1,10 +1,10 @@
-import {
+import type {
   Candle,
   MatchStatus,
   ScannerConfig,
   TrendAnalysis,
   TrendDirection,
-} from './types';
+} from './types.ts';
 
 /**
  * Computes Exponential Moving Average (EMA) over closing prices.

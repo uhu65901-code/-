@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { analyzeCandleTrend, calculateEMA } from './trendDetector';
-import { Candle, DEFAULT_SCANNER_CONFIG } from './types';
+import { analyzeCandleTrend, calculateEMA } from './trendDetector.ts';
+import { DEFAULT_SCANNER_CONFIG, type Candle } from './types.ts';
 
 function makeBaselineChoppyCandles(count: number, startPrice = 1.1): Candle[] {
   const out: Candle[] = [];

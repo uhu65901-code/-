@@ -1,1 +1,1 @@
-export * from '../lib/assetsCatalog';
+export * from '../lib/assetsCatalog.ts';

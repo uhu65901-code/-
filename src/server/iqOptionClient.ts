@@ -1,6 +1,6 @@
 import WebSocket from 'ws';
-import { AssetInfo, Candle } from '../lib/types';
-import { IQ_OPTION_ASSETS } from './assetsCatalog';
+import type { AssetInfo, Candle } from '../lib/types.ts';
+import { IQ_OPTION_ASSETS } from './assetsCatalog.ts';
 
 export type IqLoginResult =
   | { status: 'OK'; ssid: string; email: string }

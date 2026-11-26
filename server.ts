@@ -1,14 +1,14 @@
 import http from 'http';
 import path from 'path';
 import fs from 'fs';
-import express, { NextFunction, Request, Response } from 'express';
+import express from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
-import { DEFAULT_SCANNER_CONFIG, ScannerConfig } from './src/lib/types';
-import { buildProgramZipBuffer } from './src/server/downloadPackage';
-import { loginWithIqOption, verifyIqOption2FA } from './src/server/iqOptionClient';
-import { MarketScannerEngine, UserSession } from './src/server/marketEngine';
+import { DEFAULT_SCANNER_CONFIG, type ScannerConfig } from './src/lib/types.ts';
+import { buildProgramZipBuffer } from './src/server/downloadPackage.ts';
+import { loginWithIqOption, verifyIqOption2FA } from './src/server/iqOptionClient.ts';
+import { MarketScannerEngine, type UserSession } from './src/server/marketEngine.ts';
 
 dotenv.config();
 
@@ -351,6 +351,7 @@ async function startServer() {
 
   // Frontend Vite middleware or static dist
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
       server: {

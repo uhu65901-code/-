@@ -1,4 +1,4 @@
-import { AssetInfo } from './types';
+import type { AssetInfo } from './types.ts';
 
 export interface CatalogSeedAsset extends AssetInfo {
   basePrice: number;

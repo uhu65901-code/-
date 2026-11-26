@@ -1,16 +1,16 @@
 import crypto from 'crypto';
-import { analyzeCandleTrend } from '../lib/trendDetector';
+import { analyzeCandleTrend } from '../lib/trendDetector.ts';
 import {
-  AssetInfo,
-  Candle,
-  ConnectionMode,
   DEFAULT_SCANNER_CONFIG,
-  ScannerConfig,
-  ScannedAssetState,
-  TrendAlert,
-} from '../lib/types';
-import { CatalogSeedAsset, IQ_OPTION_ASSETS } from './assetsCatalog';
-import { IqLiveFeedConnection } from './iqOptionClient';
+  type AssetInfo,
+  type Candle,
+  type ConnectionMode,
+  type ScannerConfig,
+  type ScannedAssetState,
+  type TrendAlert,
+} from '../lib/types.ts';
+import { IQ_OPTION_ASSETS, type CatalogSeedAsset } from './assetsCatalog.ts';
+import { IqLiveFeedConnection } from './iqOptionClient.ts';
 
 export interface UserSession {
   token: string;
