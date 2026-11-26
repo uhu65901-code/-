@@ -347,10 +347,19 @@ async function startServer() {
     next(err);
   });
 
+  const server = http.createServer(app);
+
   // Frontend Vite middleware or static dist
   if (!isProd) {
+    const hmrDisabled = process.env.DISABLE_HMR === 'true';
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        ws: { server, path: '/vite-hmr' },
+        hmr: hmrDisabled ? false : { server, path: '/vite-hmr' },
+        watch: hmrDisabled ? null : {},
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -364,8 +373,6 @@ async function startServer() {
     }
   }
 
-  const server = http.createServer(app);
-
   // WebSocket Server on /ws
   const wss = new WebSocketServer({ noServer: true });
   const clientsByToken = new Map<WebSocket, string>();
@@ -373,7 +380,7 @@ async function startServer() {
   server.on('upgrade', (request, socket, head) => {
     const reqUrl = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
     if (reqUrl.pathname !== '/ws') {
-      return; // let Vite or others ignore/handle
+      return; // let Vite HMR handle /vite-hmr
     }
     const token = reqUrl.searchParams.get('token') ?? undefined;
     const session = engine.getSession(token);
@@ -389,6 +396,10 @@ async function startServer() {
 
   wss.on('connection', (ws: WebSocket, token: string) => {
     clientsByToken.set(ws, token);
+
+    ws.on('error', () => {
+      clientsByToken.delete(ws);
+    });
 
     const session = engine.getSession(token);
     if (session) {
