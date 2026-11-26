@@ -1,7 +1,7 @@
 export type AssetCategory = 'BINARY' | 'DIGITAL';
 export type TrendDirection = 'UP' | 'DOWN';
 export type MatchStatus = 'MATCH' | 'FORMING' | 'OVEREXTENDED' | 'NONE';
-export type ConnectionMode = 'DEMO_STREAM' | 'IQ_OPTION_LIVE';
+export type ConnectionMode = 'DEMO_STREAM' | 'IQ_OPTION_LIVE' | 'LOCAL_DEMO_STREAM';
 export type SoundDurationMode = 'STANDARD' | 'LONG';
 
 export interface Candle {

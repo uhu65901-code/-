@@ -1,6 +1,17 @@
-import React, { useState } from 'react';
-import { Download, Eye, EyeOff, KeyRound, Mail, Play, ShieldCheck, Smartphone } from 'lucide-react';
-import { ConnectionMode, ScannerConfig } from '../lib/types';
+import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Download,
+  Eye,
+  EyeOff,
+  KeyRound,
+  Mail,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+  Smartphone,
+} from 'lucide-react';
+import { ConnectionMode, DEFAULT_SCANNER_CONFIG, ScannerConfig } from '../lib/types';
+import { checkServerHealth, postJsonWithRetry, ServerHealthStatus } from '../utils/apiClient';
 import { unlockAudioContext } from '../utils/soundAlert';
 import { DownloadInstallModal } from './DownloadInstallModal';
 import { OfflineIndicator, PWAInstallButton } from './PWAInstallButton';
@@ -32,11 +43,36 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connectionIssue, setConnectionIssue] = useState(false);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
+  const [serverStatus, setServerStatus] = useState<ServerHealthStatus>('checking');
+
+  const probeServer = useCallback(async () => {
+    setServerStatus('checking');
+    const st = await checkServerHealth();
+    setServerStatus(st);
+  }, []);
+
+  useEffect(() => {
+    probeServer();
+  }, [probeServer]);
+
+  const startLocalDemoFallback = useCallback(() => {
+    onAuthenticated({
+      token: `local-demo-${Date.now()}`,
+      email: email.trim() || 'offline@flowtrend.local',
+      mode: 'LOCAL_DEMO_STREAM',
+      iqConnected: false,
+      iqStatusMessage: 'โหมดสแกนทดสอบสดในเครื่อง (ไม่ง้อเซิร์ฟเวอร์)',
+      scanningActive: true,
+      config: { ...DEFAULT_SCANNER_CONFIG },
+    });
+  }, [email, onAuthenticated]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setConnectionIssue(false);
     unlockAudioContext();
 
     if (requires2FA) {
@@ -45,27 +81,23 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
         return;
       }
       setLoading(true);
-      try {
-        const res = await fetch('/api/auth/verify-2fa', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            twoFactorToken,
-            code: twoFactorCode.trim(),
-            email,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          setError(data.error || 'ยืนยัน 2FA ไม่สำเร็จ');
-          return;
-        }
-        onAuthenticated(data);
-      } catch {
-        setError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้');
-      } finally {
-        setLoading(false);
+      const res = await postJsonWithRetry<AuthSuccessPayload>('/api/auth/verify-2fa', {
+        twoFactorToken,
+        code: twoFactorCode.trim(),
+        email,
+      });
+      setLoading(false);
+
+      if (res.ok) {
+        onAuthenticated(res.data);
+        return;
       }
+
+      if (res.kind !== 'http_error') {
+        setConnectionIssue(true);
+        probeServer();
+      }
+      setError(res.message);
       return;
     }
 
@@ -86,62 +118,60 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
     }
 
     setLoading(true);
-    try {
-      const payload =
-        authTab === 'credentials'
-          ? { mode: 'IQ_CREDENTIALS', email: email.trim(), password }
-          : { mode: 'IQ_SSID', ssid: ssid.trim(), email: email.trim() };
+    const payload =
+      authTab === 'credentials'
+        ? { mode: 'IQ_CREDENTIALS', email: email.trim(), password }
+        : { mode: 'IQ_SSID', ssid: ssid.trim(), email: email.trim() };
 
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const data = await res.json();
+    const res = await postJsonWithRetry<
+      AuthSuccessPayload & { requires2FA?: boolean; twoFactorToken?: string }
+    >('/api/auth/login', payload, 3);
+    setLoading(false);
 
-      if (res.status === 202 && data.requires2FA) {
+    if (res.ok) {
+      if (res.status === 202 && res.data.requires2FA && res.data.twoFactorToken) {
         setRequires2FA(true);
-        setTwoFactorToken(data.twoFactorToken);
+        setTwoFactorToken(res.data.twoFactorToken);
         return;
       }
-
-      if (!res.ok) {
-        setError(data.error || 'เข้าสู่ระบบไม่สำเร็จ');
-        return;
-      }
-
-      onAuthenticated(data);
-    } catch {
-      setError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ กรุณาลองใหม่');
-    } finally {
-      setLoading(false);
+      onAuthenticated(res.data);
+      return;
     }
+
+    if (res.kind !== 'http_error') {
+      setConnectionIssue(true);
+      probeServer();
+    }
+    setError(res.message);
   };
 
   const handleStartDemo = async () => {
     setError(null);
+    setConnectionIssue(false);
     unlockAudioContext();
     setLoading(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mode: 'DEMO',
-          email: email.trim() || undefined,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || 'ไม่สามารถเริ่มโหมดทดสอบได้');
-        return;
-      }
-      onAuthenticated(data);
-    } catch {
-      setError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้');
-    } finally {
-      setLoading(false);
+    const res = await postJsonWithRetry<AuthSuccessPayload>(
+      '/api/auth/login',
+      {
+        mode: 'DEMO',
+        email: email.trim() || undefined,
+      },
+      2
+    );
+    setLoading(false);
+
+    if (res.ok) {
+      onAuthenticated(res.data);
+      return;
     }
+
+    // Seamless fallback: if backend is unreachable/offline (e.g., standalone offline PWA), run local demo engine
+    if (res.kind !== 'http_error') {
+      startLocalDemoFallback();
+      return;
+    }
+
+    setError(res.message);
   };
 
   return (
@@ -217,10 +247,41 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
 
         {/* Right Authentication Form */}
         <div className="lg:col-span-6 p-6 lg:p-10 flex flex-col justify-center">
-          <div className="mb-6">
-            <h2 className="text-lg font-semibold text-[#F8FAFC]">
-              เชื่อมต่อบัญชี IQ Option
-            </h2>
+          <div className="mb-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-lg font-semibold text-[#F8FAFC]">
+                เชื่อมต่อบัญชี IQ Option
+              </h2>
+
+              <button
+                type="button"
+                onClick={probeServer}
+                className="inline-flex items-center gap-1.5 text-[11px] text-[#94A3B8] hover:text-[#E2E8F0] cursor-pointer"
+                title="กดเพื่อตรวจสอบสถานะเซิร์ฟเวอร์อีกครั้ง"
+              >
+                <span
+                  className={`w-2 h-2 rounded-full ${
+                    serverStatus === 'ready'
+                      ? 'bg-[#16C784]'
+                      : serverStatus === 'checking'
+                        ? 'bg-amber-400 animate-pulse'
+                        : 'bg-rose-400'
+                  }`}
+                />
+                <span>
+                  {serverStatus === 'ready'
+                    ? 'เซิร์ฟเวอร์พร้อมใช้งาน'
+                    : serverStatus === 'checking'
+                      ? 'กำลังเชื่อมเซิร์ฟเวอร์...'
+                      : serverStatus === 'offline'
+                        ? 'ออฟไลน์ (ไม่มีเน็ต)'
+                        : 'เชื่อมเซิร์ฟเวอร์ไม่ได้'}
+                </span>
+                {serverStatus !== 'ready' && serverStatus !== 'checking' && (
+                  <RefreshCw className="w-3 h-3 ml-0.5" />
+                )}
+              </button>
+            </div>
             <p className="mt-1 text-xs text-[#94A3B8]">
               เข้าสู่ระบบด้วย Gmail และรหัสผ่านของ IQ Option เพื่อดึงกราฟตรงกับโบรกเกอร์
             </p>
@@ -233,6 +294,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 onClick={() => {
                   setAuthTab('credentials');
                   setError(null);
+                  setConnectionIssue(false);
                 }}
                 className={`py-2 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                   authTab === 'credentials'
@@ -247,6 +309,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 onClick={() => {
                   setAuthTab('ssid');
                   setError(null);
+                  setConnectionIssue(false);
                 }}
                 className={`py-2 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                   authTab === 'ssid'
@@ -351,9 +414,29 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
             {error && (
               <div
                 role="alert"
-                className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-300 leading-relaxed"
+                className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-200 leading-relaxed space-y-2.5"
               >
-                {error}
+                <div>{error}</div>
+                {connectionIssue && (
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={probeServer}
+                      className="px-2.5 py-1.5 rounded bg-[#1D2A42] hover:bg-[#273856] text-[#E2E8F0] font-medium inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>ลองเชื่อมเซิร์ฟเวอร์ใหม่</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={startLocalDemoFallback}
+                      className="px-2.5 py-1.5 rounded bg-emerald-600/25 hover:bg-emerald-600/35 border border-emerald-500/40 text-emerald-200 font-medium inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Play className="w-3 h-3" />
+                      <span>ใช้โหมดสแกน Demo ในเครื่อง</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -363,7 +446,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
               className="w-full py-2.5 px-4 text-sm font-semibold rounded-lg bg-[#2563EB] hover:bg-[#3B82F6] disabled:opacity-60 text-white transition-colors cursor-pointer"
             >
               {loading
-                ? 'กำลังเชื่อมต่อ...'
+                ? 'กำลังเชื่อมต่อเซิร์ฟเวอร์...'
                 : requires2FA
                   ? 'ยืนยันรหัส 2FA และเริ่มสแกน'
                   : 'เข้าสู่ระบบและเชื่อมต่อ IQ Option'}
@@ -386,9 +469,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
             ทดลองสแกนสตรีมกราฟ 1 นาทีเรียลไทม์ (Demo Feed)
           </button>
 
-          <div className="mt-4 flex items-center justify-center gap-2 text-[11px] text-[#64748B]">
-            <Smartphone className="w-3.5 h-3.5 text-[#60A5FA]" />
-            <span>รองรับทั้งมือถือ Android (PWA เต็มจอ) และคอมพิวเตอร์ PC</span>
+          <div className="mt-4 flex items-center justify-center gap-2 text-[11px] text-[#64748B] text-center">
+            <Smartphone className="w-3.5 h-3.5 text-[#60A5FA] shrink-0" />
+            <span>รองรับมือถือ Android (PWA เต็มจอ) และคอมพิวเตอร์ PC</span>
           </div>
         </div>
       </div>

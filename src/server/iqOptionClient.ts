@@ -35,11 +35,14 @@ export async function loginWithIqOption(
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
         Accept: 'application/json',
+        Origin: 'https://iqoption.com',
+        Referer: 'https://iqoption.com/',
       },
       body: JSON.stringify({
         identifier: email.trim(),
         password,
       }),
+      signal: AbortSignal.timeout(12000),
     });
 
     const rawText = await response.text();
@@ -92,10 +95,13 @@ export async function loginWithIqOption(
           : `IQ Option ตอบกลับสถานะ ${response.status}`,
     };
   } catch (err) {
+    const isTimeout =
+      err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
     return {
       status: 'ERROR',
-      message:
-        err instanceof Error
+      message: isTimeout
+        ? 'เซิร์ฟเวอร์ IQ Option ตอบสนองช้าเกินไป กรุณาลองใหม่หรือใช้ Session SSID'
+        : err instanceof Error
           ? `ไม่สามารถเชื่อมต่อ IQ Option ได้: ${err.message}`
           : 'เกิดข้อผิดพลาดในการเชื่อมต่อ IQ Option',
     };
@@ -112,11 +118,14 @@ export async function verifyIqOption2FA(
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        Origin: 'https://iqoption.com',
+        Referer: 'https://iqoption.com/',
       },
       body: JSON.stringify({
         token,
         code: code.trim(),
       }),
+      signal: AbortSignal.timeout(12000),
     });
 
     const rawText = await response.text();

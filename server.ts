@@ -48,6 +48,11 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '256kb' }));
 
+  app.get('/api/health', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ ok: true, service: 'flowtrend-iq', timestamp: Date.now() });
+  });
+
   // Auth routes
   app.post('/api/auth/login', async (req: Request, res: Response) => {
     const { mode, email, password, ssid } = req.body ?? {};
@@ -322,6 +327,24 @@ async function startServer() {
       return;
     }
     res.json({ alert: updated });
+  });
+
+  // Ensure unknown /api/* routes always return JSON instead of SPA HTML
+  app.all('/api/*', (_req: Request, res: Response) => {
+    res.status(404).json({ error: 'ไม่พบ API ที่เรียกใช้งาน' });
+  });
+
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api/')) {
+      res.status(500).json({
+        error:
+          err instanceof Error
+            ? `เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์: ${err.message}`
+            : 'เกิดข้อผิดพลาดฝั่งเซิร์ฟเวอร์',
+      });
+      return;
+    }
+    next(err);
   });
 
   // Frontend Vite middleware or static dist

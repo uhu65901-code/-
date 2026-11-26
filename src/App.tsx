@@ -10,6 +10,7 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
+import { LocalDemoScanner } from './lib/localDemoEngine';
 import {
   ConnectionMode,
   DEFAULT_SCANNER_CONFIG,
@@ -62,6 +63,18 @@ export default function App() {
   const wakeLockRef = useRef<{ release: () => Promise<void> } | null>(null);
   const wakeLockSupported =
     typeof navigator !== 'undefined' && 'wakeLock' in navigator;
+
+  const localScannerRef = useRef<LocalDemoScanner | null>(null);
+  const localConfigRef = useRef<ScannerConfig>(config);
+  const localActiveRef = useRef<boolean>(true);
+
+  useEffect(() => {
+    localConfigRef.current = config;
+  }, [config]);
+
+  useEffect(() => {
+    localActiveRef.current = session?.scanningActive ?? true;
+  }, [session?.scanningActive]);
 
   const soundConfigRef = useRef({
     enabled: config.soundEnabled,
@@ -169,6 +182,40 @@ export default function App() {
   useEffect(() => {
     if (!session) return;
 
+    if (session.mode === 'LOCAL_DEMO_STREAM') {
+      const localEngine = new LocalDemoScanner();
+      localScannerRef.current = localEngine;
+      const snap0 = localEngine.getSnapshot(localConfigRef.current);
+      setAssets(snap0.assets);
+      setAlerts(snap0.alerts);
+      const firstUnacked = snap0.alerts.find((a) => !a.acknowledged);
+      if (firstUnacked) setLiveBannerAlert(firstUnacked);
+      setWsConnected(true);
+
+      const timer = window.setInterval(() => {
+        const newAlerts = localEngine.step(localConfigRef.current, localActiveRef.current);
+        const snap = localEngine.getSnapshot(localConfigRef.current);
+        setAssets(snap.assets);
+        setAlerts(snap.alerts);
+        for (const alert of newAlerts) {
+          setLiveBannerAlert(alert);
+          triggerSignalVibration();
+          if (soundConfigRef.current.enabled) {
+            playTrendAlertChime(
+              alert.direction,
+              soundConfigRef.current.volume,
+              soundConfigRef.current.durationMode
+            );
+          }
+        }
+      }, 1000);
+
+      return () => {
+        window.clearInterval(timer);
+        localScannerRef.current = null;
+      };
+    }
+
     let cancelled = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: number | null = null;
@@ -273,18 +320,31 @@ export default function App() {
 
   const handleSaveConfig = async (next: ScannerConfig) => {
     if (!session) return;
-    const res = await fetch('/api/scanner/config', {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.token}`,
-      },
-      body: JSON.stringify(next),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.config) setConfig(data.config);
-      if (Array.isArray(data.assets)) setAssets(data.assets);
+    if (session.mode === 'LOCAL_DEMO_STREAM') {
+      setConfig(next);
+      if (localScannerRef.current) {
+        const snap = localScannerRef.current.getSnapshot(next);
+        setAssets(snap.assets);
+      }
+      return;
+    }
+    try {
+      const res = await fetch('/api/scanner/config', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.token}`,
+        },
+        body: JSON.stringify(next),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.config) setConfig(data.config);
+        if (Array.isArray(data.assets)) setAssets(data.assets);
+      }
+    } catch {
+      // keep optimistic state
     }
   };
 
@@ -298,9 +358,11 @@ export default function App() {
     if (!session) return;
     const nextActive = !session.scanningActive;
     setSession((prev) => (prev ? { ...prev, scanningActive: nextActive } : prev));
+    if (session.mode === 'LOCAL_DEMO_STREAM') return;
     try {
       await fetch('/api/scanner/toggle', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session.token}`,
@@ -317,31 +379,45 @@ export default function App() {
     decisionNote: 'WATCHED' | 'TRADED_MANUAL' | 'SKIPPED'
   ) => {
     if (!session) return;
-    const res = await fetch(`/api/alerts/${encodeURIComponent(alertId)}/decision`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${session.token}`,
-      },
-      body: JSON.stringify({ acknowledged: true, decisionNote }),
-    });
-    if (res.ok) {
-      const data = await res.json();
-      if (data.alert) {
-        setAlerts((prev) =>
-          prev.map((a) => (a.id === alertId ? data.alert : a))
-        );
-        if (liveBannerAlert?.id === alertId) {
-          setLiveBannerAlert(null);
+    if (session.mode === 'LOCAL_DEMO_STREAM') {
+      const updated = localScannerRef.current?.markDecision(alertId, decisionNote);
+      if (updated) {
+        setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...updated } : a)));
+        if (liveBannerAlert?.id === alertId) setLiveBannerAlert(null);
+      }
+      return;
+    }
+    try {
+      const res = await fetch(`/api/alerts/${encodeURIComponent(alertId)}/decision`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.token}`,
+        },
+        body: JSON.stringify({ acknowledged: true, decisionNote }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.alert) {
+          setAlerts((prev) =>
+            prev.map((a) => (a.id === alertId ? data.alert : a))
+          );
+          if (liveBannerAlert?.id === alertId) {
+            setLiveBannerAlert(null);
+          }
         }
       }
+    } catch {
+      // ignore transient errors
     }
   };
 
   const handleLogout = async () => {
-    if (session) {
+    if (session && session.mode !== 'LOCAL_DEMO_STREAM') {
       fetch('/api/auth/logout', {
         method: 'POST',
+        credentials: 'same-origin',
         headers: { Authorization: `Bearer ${session.token}` },
       }).catch(() => {});
     }
