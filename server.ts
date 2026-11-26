@@ -5,8 +5,18 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import { WebSocket, WebSocketServer } from 'ws';
 import dotenv from 'dotenv';
-import { DEFAULT_SCANNER_CONFIG, type ScannerConfig } from './src/lib/types.ts';
-import { buildProgramZipBuffer } from './src/server/downloadPackage.ts';
+import {
+  DEFAULT_SCANNER_CONFIG,
+  type PatternFeatureVector,
+  type PatternVerdict,
+  type ScannerConfig,
+  type TrendDirection,
+} from './src/lib/types.ts';
+import { createFeedbackSample } from './src/lib/aiPatternLearner.ts';
+import {
+  buildProgramZipBuffer,
+  buildStandaloneAppHtmlBuffer,
+} from './src/server/downloadPackage.ts';
 import { loginWithIqOption, verifyIqOption2FA } from './src/server/iqOptionClient.ts';
 import { MarketScannerEngine, type UserSession } from './src/server/marketEngine.ts';
 
@@ -46,7 +56,7 @@ function clampNumber(val: unknown, min: number, max: number, fallback: number): 
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '4mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -204,6 +214,7 @@ async function startServer() {
     const session = req.userSession!;
     const assets = engine.getScannedStates(session.config, session.token);
     const alerts = engine.getAlerts();
+    const decisionRecords = engine.getDecisionRecords();
     res.json({
       session: {
         email: session.email,
@@ -215,6 +226,9 @@ async function startServer() {
       config: session.config,
       assets,
       alerts,
+      decisionRecords,
+      aiSamples: engine.getAiSamples(),
+      aiModel: engine.getAiModel(),
     });
   });
 
@@ -225,32 +239,48 @@ async function startServer() {
     res.json({ scanningActive: active });
   });
 
+  app.post('/api/scanner/select-asset', requireAuth, (req: AuthedRequest, res: Response) => {
+    const session = req.userSession!;
+    const assetId = typeof req.body?.assetId === 'string' ? req.body.assetId : '';
+    if (assetId) {
+      engine.requestAssetCandles(session.token, assetId);
+    }
+    res.json({ ok: true });
+  });
+
   app.put('/api/scanner/config', requireAuth, (req: AuthedRequest, res: Response) => {
     const session = req.userSession!;
     const body = req.body ?? {};
     const cur = session.config;
 
+    const scanWindowBars = Math.round(
+      clampNumber(body.scanWindowBars, 15, 20, cur.scanWindowBars)
+    );
     const minCandles = Math.round(
-      clampNumber(body.targetMinCandles, 3, 6, cur.targetMinCandles)
+      clampNumber(body.targetMinCandles, 3, 8, cur.targetMinCandles)
     );
     const maxCandles = Math.max(
       minCandles,
-      Math.round(clampNumber(body.targetMaxCandles, 4, 7, cur.targetMaxCandles))
+      Math.round(clampNumber(body.targetMaxCandles, 3, 10, cur.targetMaxCandles))
     );
 
     const nextConfig: Partial<ScannerConfig> = {
+      scanWindowBars,
       targetMinCandles: minCandles,
       targetMaxCandles: maxCandles,
       maxWickRatio: clampNumber(body.maxWickRatio, 0.05, 0.55, cur.maxWickRatio),
       minUniformityScore: Math.round(
         clampNumber(body.minUniformityScore, 45, 95, cur.minUniformityScore)
       ),
+      minMatchScore: Math.round(
+        clampNumber(body.minMatchScore, 75, 98, cur.minMatchScore)
+      ),
       maxCounterCandles: Math.round(
         clampNumber(body.maxCounterCandles, 0, 1, cur.maxCounterCandles)
       ),
       maxBodyToMedianRatio: clampNumber(
         body.maxBodyToMedianRatio,
-        1.2,
+        1.1,
         3.5,
         cur.maxBodyToMedianRatio
       ),
@@ -259,6 +289,17 @@ async function startServer() {
         0.15,
         0.8,
         cur.minBodyToMedianRatio
+      ),
+      realtimeAlertImmediate:
+        typeof body.realtimeAlertImmediate === 'boolean'
+          ? body.realtimeAlertImmediate
+          : cur.realtimeAlertImmediate,
+      aiLearningEnabled:
+        typeof body.aiLearningEnabled === 'boolean'
+          ? body.aiLearningEnabled
+          : cur.aiLearningEnabled,
+      aiInfluencePercent: Math.round(
+        clampNumber(body.aiInfluencePercent, 0, 60, cur.aiInfluencePercent)
       ),
       directionFilter:
         body.directionFilter === 'UP' ||
@@ -300,33 +341,151 @@ async function startServer() {
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader(
         'Content-Disposition',
-        'attachment; filename="FlowTrend-IQ-Program.zip"'
+        'attachment; filename="FlowTrend-IQ-PC-Setup.zip"'
       );
       res.send(zipBuf);
     } catch {
-      res.status(500).json({ error: 'ไม่สามารถสร้างไฟล์ดาวน์โหลดโปรแกรมได้' });
+      res.status(500).json({ error: 'ไม่สามารถสร้างไฟล์ติดตั้งโปรแกรมได้' });
+    }
+  });
+
+  app.get('/api/download/android-app', async (_req: Request, res: Response) => {
+    try {
+      const htmlBuf = await buildStandaloneAppHtmlBuffer();
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader(
+        'Content-Disposition',
+        'attachment; filename="FlowTrend-IQ-App.html"'
+      );
+      res.send(htmlBuf);
+    } catch {
+      res.status(500).json({ error: 'ไม่สามารถสร้างไฟล์แอปสำหรับ Android ได้' });
     }
   });
 
   app.post('/api/alerts/:id/decision', requireAuth, (req: AuthedRequest, res: Response) => {
     const id = req.params.id;
-    const { acknowledged, decisionNote } = req.body ?? {};
+    const { acknowledged, decisionNote, tradeOutcome } = req.body ?? {};
     const validNote =
       decisionNote === 'WATCHED' ||
       decisionNote === 'TRADED_MANUAL' ||
       decisionNote === 'SKIPPED'
         ? decisionNote
         : undefined;
+    const validOutcome =
+      tradeOutcome === 'WIN' || tradeOutcome === 'LOSS' || tradeOutcome === 'DRAW'
+        ? tradeOutcome
+        : undefined;
 
     const updated = engine.updateAlertDecision(id, {
       acknowledged: typeof acknowledged === 'boolean' ? acknowledged : undefined,
       decisionNote: validNote,
+      tradeOutcome: validOutcome,
     });
     if (!updated) {
       res.status(404).json({ error: 'ไม่พบสัญญาณแจ้งเตือนที่ระบุ' });
       return;
     }
-    res.json({ alert: updated });
+    res.json({ alert: updated, decisionRecords: engine.getDecisionRecords() });
+  });
+
+  app.post('/api/ai/feedback', requireAuth, (req: AuthedRequest, res: Response) => {
+    const session = req.userSession!;
+    const body = req.body ?? {};
+    const verdict: PatternVerdict | null =
+      body.verdict === 'PASS' || body.verdict === 'REJECT' ? body.verdict : null;
+    const direction: TrendDirection | null =
+      body.direction === 'UP' || body.direction === 'DOWN' ? body.direction : null;
+    const assetId = typeof body.assetId === 'string' ? body.assetId.trim() : '';
+    const assetName = typeof body.assetName === 'string' ? body.assetName.trim() : '';
+    const rawFeatures = body.features as Partial<PatternFeatureVector> | undefined;
+
+    if (!verdict || !direction || !assetId || !assetName || !rawFeatures) {
+      res.status(400).json({ error: 'ข้อมูลตัวอย่างทรงกราฟสำหรับสอน AI ไม่ครบถ้วน' });
+      return;
+    }
+
+    const features: PatternFeatureVector = {
+      runLengthNorm: clampNumber(rawFeatures.runLengthNorm, 0.3, 1.6, 0.8),
+      avgWickRatio: clampNumber(rawFeatures.avgWickRatio, 0, 1, 0.12),
+      reverseWickRatio: clampNumber(rawFeatures.reverseWickRatio, 0, 1.5, 0.1),
+      uniformityScoreNorm: clampNumber(rawFeatures.uniformityScoreNorm, 0, 1, 0.85),
+      avgBodyToMedianRatio: clampNumber(rawFeatures.avgBodyToMedianRatio, 0.2, 2.5, 1),
+      bodyTrendSlope: clampNumber(rawFeatures.bodyTrendSlope, 0.4, 1.8, 1),
+      directionalEfficiency: clampNumber(rawFeatures.directionalEfficiency, 0, 1, 0.85),
+      emaDistanceRatio: clampNumber(rawFeatures.emaDistanceRatio, 0, 3, 0.7),
+      swingScoreNorm: clampNumber(rawFeatures.swingScoreNorm, 0, 1, 0.9),
+    };
+
+    if (features.directionalEfficiency < 0.58) {
+      res.status(400).json({
+        error:
+          'กราฟนี้ยังเป็นไซด์เวย์ในกรอบ M15 — AI จะเรียนรู้เฉพาะกราฟไหลเป็นเทรนด์ขึ้นหรือเทรนด์ลงเท่านั้น',
+      });
+      return;
+    }
+
+    const sample = createFeedbackSample({
+      alertId: typeof body.alertId === 'string' ? body.alertId : undefined,
+      assetId,
+      assetName,
+      direction,
+      verdict,
+      baseMatchScore: Math.round(clampNumber(body.baseMatchScore, 0, 100, 88)),
+      aiScoreAtTime:
+        typeof body.aiScoreAtTime === 'number'
+          ? Math.round(clampNumber(body.aiScoreAtTime, 0, 100, 80))
+          : undefined,
+      runLength: Math.round(clampNumber(body.runLength, 1, 15, 5)),
+      avgWickRatio: clampNumber(body.avgWickRatio, 0, 1, 0.12),
+      uniformityScore: Math.round(clampNumber(body.uniformityScore, 0, 100, 85)),
+      features,
+    });
+
+    const result = engine.addAiFeedbackSample(sample);
+    const assets = engine.getScannedStates(session.config, session.token);
+
+    res.json({
+      sample,
+      aiSamples: result.aiSamples,
+      aiModel: result.aiModel,
+      alerts: result.alerts,
+      assets,
+    });
+  });
+
+  app.post('/api/ai/sync', requireAuth, (req: AuthedRequest, res: Response) => {
+    const session = req.userSession!;
+    const rawSamples = Array.isArray(req.body?.samples) ? req.body.samples : [];
+    const result = engine.syncAiSamples(rawSamples);
+    const assets = engine.getScannedStates(session.config, session.token);
+    res.json({
+      aiSamples: result.aiSamples,
+      aiModel: result.aiModel,
+      assets,
+    });
+  });
+
+  app.delete('/api/ai/feedback/:id', requireAuth, (req: AuthedRequest, res: Response) => {
+    const session = req.userSession!;
+    const result = engine.removeAiSample(req.params.id);
+    const assets = engine.getScannedStates(session.config, session.token);
+    res.json({
+      aiSamples: result.aiSamples,
+      aiModel: result.aiModel,
+      assets,
+    });
+  });
+
+  app.post('/api/ai/reset', requireAuth, (req: AuthedRequest, res: Response) => {
+    const session = req.userSession!;
+    const result = engine.clearAiSamples();
+    const assets = engine.getScannedStates(session.config, session.token);
+    res.json({
+      aiSamples: result.aiSamples,
+      aiModel: result.aiModel,
+      assets,
+    });
   });
 
   // Ensure unknown /api/* routes always return JSON instead of SPA HTML
@@ -410,6 +569,9 @@ async function startServer() {
           payload: {
             assets: engine.getScannedStates(session.config, session.token),
             alerts: engine.getAlerts(),
+            decisionRecords: engine.getDecisionRecords(),
+            aiSamples: engine.getAiSamples(),
+            aiModel: engine.getAiModel(),
             iqConnected: session.iqConnected,
             iqStatusMessage: session.iqStatusMessage,
           },
@@ -438,6 +600,9 @@ async function startServer() {
             payload: {
               assets: engine.getScannedStates(session.config, session.token),
               alerts: engine.getAlerts(),
+              decisionRecords: engine.getDecisionRecords(),
+              aiSamples: engine.getAiSamples(),
+              aiModel: engine.getAiModel(),
               iqConnected: session.iqConnected,
               iqStatusMessage: session.iqStatusMessage,
             },

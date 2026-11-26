@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
+  Brain,
+  CheckCircle2,
   Download,
   ListFilter,
   Pause,
@@ -9,18 +11,49 @@ import {
   TrendingUp,
   Volume2,
   VolumeX,
+  X,
+  XCircle,
+  Zap,
 } from 'lucide-react';
+import {
+  assessChartFlowForAiTraining,
+  buildAiPatternModel,
+  createFeedbackSample,
+} from './lib/aiPatternLearner';
+import { compareAssetsByFlowRank } from './lib/assetRanking';
+import { IqBrowserScanner } from './lib/iqBrowserFeed';
 import { LocalDemoScanner } from './lib/localDemoEngine';
 import {
+  deduplicateAlertsByAsset,
+  normalizeAssetHistoryKey,
+} from './lib/performanceStats';
+import {
+  loadSavedAiSamples,
+  loadSavedAlerts,
+  loadSavedConfig,
+  loadSavedDecisionRecords,
+  saveAiSamplesLocally,
+  saveAlertsLocally,
+  saveConfigLocally,
+  saveDecisionRecordsLocally,
+} from './lib/standaloneStorage';
+import {
   ConnectionMode,
-  DEFAULT_SCANNER_CONFIG,
+  DecisionRecord,
+  MAX_AI_TRAINING_SAMPLES,
+  PatternFeatureVector,
+  PatternFeedbackSample,
+  PatternVerdict,
   ScannerConfig,
   ScannedAssetState,
+  TradeOutcome,
   TrendAlert,
+  TrendDirection,
 } from './lib/types';
 import { AuthSuccessPayload, LoginScreen } from './components/LoginScreen';
 import { ActiveTab, HeaderBar } from './components/HeaderBar';
 import { CandlestickChart } from './components/CandlestickChart';
+import { ChartQuickSearch } from './components/ChartQuickSearch';
 import { ScannerSidebar } from './components/ScannerSidebar';
 import { AlertsHistoryView } from './components/AlertsHistoryView';
 import { ScannerSettingsView } from './components/ScannerSettingsView';
@@ -39,23 +72,32 @@ interface SessionInfo {
   iqConnected: boolean;
   iqStatusMessage?: string;
   scanningActive: boolean;
+  ssid?: string;
 }
-
-const DEFAULT_SLOTS = ['satsusd-otc', 'bitcoin-gold', 'usdcop-otc', 'sp-gold'];
 
 export default function App() {
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [activeTab, setActiveTab] = useState<ActiveTab>('scanner');
-  const [config, setConfig] = useState<ScannerConfig>(DEFAULT_SCANNER_CONFIG);
+  const [config, setConfig] = useState<ScannerConfig>(() => loadSavedConfig());
   const [assets, setAssets] = useState<ScannedAssetState[]>([]);
   const [alerts, setAlerts] = useState<TrendAlert[]>([]);
+  const [decisionRecords, setDecisionRecords] = useState<DecisionRecord[]>([]);
+  const [aiSamples, setAiSamples] = useState<PatternFeedbackSample[]>(() =>
+    loadSavedAiSamples()
+  );
+  const [recentChartVerdicts, setRecentChartVerdicts] = useState<
+    Record<string, PatternVerdict>
+  >({});
 
-  // 1-4 simultaneous charts state
+  const aiModel = useMemo(() => buildAiPatternModel(aiSamples), [aiSamples]);
+
+  // 1-4 simultaneous charts state (locked once chosen so chart never jumps automatically)
   const [chartCount, setChartCount] = useState<1 | 2 | 3 | 4>(1);
-  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>(DEFAULT_SLOTS);
+  const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [activeSlotIndex, setActiveSlotIndex] = useState<number>(0);
 
   const [liveBannerAlert, setLiveBannerAlert] = useState<TrendAlert | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<'chart' | 'list'>('chart');
@@ -65,8 +107,11 @@ export default function App() {
     typeof navigator !== 'undefined' && 'wakeLock' in navigator;
 
   const localScannerRef = useRef<LocalDemoScanner | null>(null);
+  const browserScannerRef = useRef<IqBrowserScanner | null>(null);
   const localConfigRef = useRef<ScannerConfig>(config);
   const localActiveRef = useRef<boolean>(true);
+  const chartWorkspaceRef = useRef<HTMLElement | null>(null);
+  const lastSoundAtRef = useRef<number>(0);
 
   useEffect(() => {
     localConfigRef.current = config;
@@ -156,14 +201,33 @@ export default function App() {
       iqConnected: payload.iqConnected,
       iqStatusMessage: payload.iqStatusMessage,
       scanningActive: payload.scanningActive ?? true,
+      ssid: payload.ssid,
     });
     setConfig(payload.config);
+    saveConfigLocally(payload.config);
   }, []);
 
   useEffect(() => {
     if (session) return;
     const params = new URLSearchParams(window.location.search);
     if (params.get('autostart') === '1') {
+      const startOfflineDemo = () => {
+        handleAuthenticated({
+          token: `local-demo-${Date.now()}`,
+          email: 'standalone@flowtrend.local',
+          mode: 'LOCAL_DEMO_STREAM',
+          iqConnected: false,
+          iqStatusMessage: 'โหมดสแกนทำงานอิสระในเครื่อง (ไม่ต้องพึ่งเซิร์ฟเวอร์)',
+          scanningActive: true,
+          config: loadSavedConfig(),
+        });
+      };
+
+      if (window.location.protocol === 'file:' || window.location.protocol === 'content:') {
+        startOfflineDemo();
+        return;
+      }
+
       fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -173,9 +237,13 @@ export default function App() {
         .then((data) => {
           if (data?.token) {
             handleAuthenticated(data);
+          } else {
+            startOfflineDemo();
           }
         })
-        .catch(() => {});
+        .catch(() => {
+          startOfflineDemo();
+        });
     }
   }, [session, handleAuthenticated]);
 
@@ -183,29 +251,56 @@ export default function App() {
     if (!session) return;
 
     if (session.mode === 'LOCAL_DEMO_STREAM') {
-      const localEngine = new LocalDemoScanner();
+      const localEngine = new LocalDemoScanner({
+        alerts: loadSavedAlerts(),
+        decisionRecords: loadSavedDecisionRecords(),
+        aiSamples: loadSavedAiSamples(),
+      });
       localScannerRef.current = localEngine;
       const snap0 = localEngine.getSnapshot(localConfigRef.current);
+      const unique0 = deduplicateAlertsByAsset(snap0.alerts);
       setAssets(snap0.assets);
-      setAlerts(snap0.alerts);
-      const firstUnacked = snap0.alerts.find((a) => !a.acknowledged);
+      setAlerts(unique0);
+      saveAlertsLocally(unique0);
+      setDecisionRecords(snap0.decisionRecords);
+      setAiSamples(snap0.aiSamples);
+      saveAiSamplesLocally(snap0.aiSamples);
+      const firstUnacked = unique0.find((a) => !a.acknowledged);
       if (firstUnacked) setLiveBannerAlert(firstUnacked);
       setWsConnected(true);
 
       const timer = window.setInterval(() => {
         const newAlerts = localEngine.step(localConfigRef.current, localActiveRef.current);
         const snap = localEngine.getSnapshot(localConfigRef.current);
+        const unique = deduplicateAlertsByAsset(snap.alerts);
         setAssets(snap.assets);
-        setAlerts(snap.alerts);
-        for (const alert of newAlerts) {
-          setLiveBannerAlert(alert);
-          triggerSignalVibration();
-          if (soundConfigRef.current.enabled) {
-            playTrendAlertChime(
-              alert.direction,
-              soundConfigRef.current.volume,
-              soundConfigRef.current.durationMode
+        setAlerts(unique);
+        setDecisionRecords(snap.decisionRecords);
+        if (newAlerts.length > 0) {
+          saveAlertsLocally(unique);
+          const bestNewAlert = [...newAlerts].sort(
+            (a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0)
+          )[0];
+          if (bestNewAlert) {
+            setLiveBannerAlert((prev) =>
+              !prev ||
+              prev.acknowledged ||
+              (bestNewAlert.matchScore ?? 0) >= (prev.matchScore ?? 0)
+                ? bestNewAlert
+                : prev
             );
+            const nowMs = Date.now();
+            if (nowMs - lastSoundAtRef.current >= 8000) {
+              lastSoundAtRef.current = nowMs;
+              triggerSignalVibration();
+              if (soundConfigRef.current.enabled) {
+                playTrendAlertChime(
+                  bestNewAlert.direction,
+                  soundConfigRef.current.volume,
+                  soundConfigRef.current.durationMode
+                );
+              }
+            }
           }
         }
       }, 1000);
@@ -216,33 +311,166 @@ export default function App() {
       };
     }
 
+    if (session.mode === 'IQ_BROWSER_LIVE') {
+      const browserScanner = new IqBrowserScanner({
+        ssid: session.ssid ?? '',
+        initialAlerts: loadSavedAlerts(),
+        initialDecisions: loadSavedDecisionRecords(),
+        initialAiSamples: loadSavedAiSamples(),
+        getConfig: () => localConfigRef.current,
+        isScanningActive: () => localActiveRef.current,
+        onSignal: (alert) => {
+          setLiveBannerAlert((prev) =>
+            !prev ||
+            prev.acknowledged ||
+            (alert.matchScore ?? 0) >= (prev.matchScore ?? 0)
+              ? alert
+              : prev
+          );
+          const nowMs = Date.now();
+          if (nowMs - lastSoundAtRef.current >= 8000) {
+            lastSoundAtRef.current = nowMs;
+            triggerSignalVibration();
+            if (soundConfigRef.current.enabled) {
+              playTrendAlertChime(
+                alert.direction,
+                soundConfigRef.current.volume,
+                soundConfigRef.current.durationMode
+              );
+            }
+          }
+        },
+        onUpdate: () => {
+          const snap = browserScanner.getSnapshot(localConfigRef.current);
+          const unique = deduplicateAlertsByAsset(snap.alerts);
+          setAssets(snap.assets);
+          setAlerts(unique);
+          saveAlertsLocally(unique);
+          setDecisionRecords(snap.decisionRecords);
+          setAiSamples(snap.aiSamples);
+          saveAiSamplesLocally(snap.aiSamples);
+        },
+        onStatus: (connected, message) => {
+          setWsConnected(connected);
+          setSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  iqConnected: connected,
+                  iqStatusMessage: message,
+                }
+              : prev
+          );
+        },
+      });
+      browserScannerRef.current = browserScanner;
+      const snap0 = browserScanner.getSnapshot(localConfigRef.current);
+      const unique0 = deduplicateAlertsByAsset(snap0.alerts);
+      setAssets(snap0.assets);
+      setAlerts(unique0);
+      setDecisionRecords(snap0.decisionRecords);
+      setAiSamples(snap0.aiSamples);
+      browserScanner.connect();
+
+      const timer = window.setInterval(() => {
+        const snap = browserScanner.getSnapshot(localConfigRef.current);
+        setAssets(snap.assets);
+      }, 1000);
+
+      return () => {
+        window.clearInterval(timer);
+        browserScanner.disconnect();
+        browserScannerRef.current = null;
+      };
+    }
+
     let cancelled = false;
     let ws: WebSocket | null = null;
     let reconnectTimer: number | null = null;
+    let pollTimer: number | null = null;
+    let wsIsUp = false;
 
     const loadInitial = async () => {
       try {
         const res = await fetch('/api/scanner/state', {
+          credentials: 'same-origin',
+          cache: 'no-store',
           headers: { Authorization: `Bearer ${session.token}` },
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (session.mode === 'DEMO_STREAM' && !cancelled) {
+            setSession((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    mode: 'LOCAL_DEMO_STREAM',
+                    iqStatusMessage: 'โหมดสแกนทดสอบสดในเครื่อง',
+                  }
+                : prev
+            );
+          }
+          return;
+        }
         const data = await res.json();
         if (cancelled) return;
         if (Array.isArray(data.assets)) {
           setAssets(data.assets);
         }
         if (Array.isArray(data.alerts)) {
-          setAlerts(data.alerts);
-          const firstUnacked = data.alerts.find((a: TrendAlert) => !a.acknowledged);
+          const unique = deduplicateAlertsByAsset(data.alerts);
+          setAlerts(unique);
+          const firstUnacked = unique.find((a: TrendAlert) => !a.acknowledged);
           if (firstUnacked) {
             setLiveBannerAlert(firstUnacked);
           }
+        }
+        if (Array.isArray(data.decisionRecords)) {
+          setDecisionRecords(data.decisionRecords);
+        }
+        const localDeviceSamples = loadSavedAiSamples();
+        if (Array.isArray(data.aiSamples) && data.aiSamples.length > 0) {
+          setAiSamples(data.aiSamples);
+          saveAiSamplesLocally(data.aiSamples);
+        } else if (localDeviceSamples.length > 0) {
+          setAiSamples(localDeviceSamples);
+          fetch('/api/ai/sync', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${session.token}`,
+            },
+            body: JSON.stringify({ samples: localDeviceSamples }),
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((syncRes) => {
+              if (!cancelled && syncRes) {
+                if (Array.isArray(syncRes.aiSamples)) {
+                  setAiSamples(syncRes.aiSamples);
+                  saveAiSamplesLocally(syncRes.aiSamples);
+                }
+                if (Array.isArray(syncRes.assets)) {
+                  setAssets(syncRes.assets);
+                }
+              }
+            })
+            .catch(() => {});
         }
         if (data.config) {
           setConfig(data.config);
         }
       } catch {
-        // ignore transient errors
+        if (session.mode === 'DEMO_STREAM' && !cancelled) {
+          setSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  mode: 'LOCAL_DEMO_STREAM',
+                  iqStatusMessage: 'โหมดสแกนทดสอบสดในเครื่อง',
+                }
+              : prev
+          );
+        }
       }
     };
 
@@ -255,6 +483,7 @@ export default function App() {
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
+        wsIsUp = true;
         if (!cancelled) setWsConnected(true);
       };
 
@@ -266,7 +495,14 @@ export default function App() {
               setAssets(msg.payload.assets);
             }
             if (Array.isArray(msg.payload.alerts)) {
-              setAlerts(msg.payload.alerts);
+              setAlerts(deduplicateAlertsByAsset(msg.payload.alerts));
+            }
+            if (Array.isArray(msg.payload.decisionRecords)) {
+              setDecisionRecords(msg.payload.decisionRecords);
+            }
+            if (Array.isArray(msg.payload.aiSamples) && msg.payload.aiSamples.length > 0) {
+              setAiSamples(msg.payload.aiSamples);
+              saveAiSamplesLocally(msg.payload.aiSamples);
             }
             if (typeof msg.payload.iqConnected === 'boolean') {
               setSession((prev) =>
@@ -281,18 +517,36 @@ export default function App() {
             }
           } else if (msg.type === 'signal:detected' && msg.payload) {
             const newAlert = msg.payload as TrendAlert;
+            const newKey = normalizeAssetHistoryKey(
+              newAlert.assetName,
+              newAlert.assetId
+            );
             setAlerts((prev) => [
               newAlert,
-              ...prev.filter((item) => item.id !== newAlert.id),
+              ...prev.filter(
+                (item) =>
+                  item.id !== newAlert.id &&
+                  normalizeAssetHistoryKey(item.assetName, item.assetId) !== newKey
+              ),
             ]);
-            setLiveBannerAlert(newAlert);
-            triggerSignalVibration();
-            if (soundConfigRef.current.enabled) {
-              playTrendAlertChime(
-                newAlert.direction,
-                soundConfigRef.current.volume,
-                soundConfigRef.current.durationMode
-              );
+            setLiveBannerAlert((prev) =>
+              !prev ||
+              prev.acknowledged ||
+              (newAlert.matchScore ?? 0) >= (prev.matchScore ?? 0)
+                ? newAlert
+                : prev
+            );
+            const nowMs = Date.now();
+            if (nowMs - lastSoundAtRef.current >= 8000) {
+              lastSoundAtRef.current = nowMs;
+              triggerSignalVibration();
+              if (soundConfigRef.current.enabled) {
+                playTrendAlertChime(
+                  newAlert.direction,
+                  soundConfigRef.current.volume,
+                  soundConfigRef.current.durationMode
+                );
+              }
             }
           }
         } catch {
@@ -301,6 +555,7 @@ export default function App() {
       };
 
       ws.onclose = () => {
+        wsIsUp = false;
         if (!cancelled) {
           setWsConnected(false);
           reconnectTimer = window.setTimeout(connectWs, 2500);
@@ -310,20 +565,35 @@ export default function App() {
 
     loadInitial();
     connectWs();
+    pollTimer = window.setInterval(() => {
+      if (!wsIsUp && !cancelled) {
+        loadInitial();
+      }
+    }, 2000);
 
     return () => {
       cancelled = true;
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (pollTimer) window.clearInterval(pollTimer);
       if (ws) ws.close();
     };
-  }, [session?.token]);
+  }, [session?.token, session?.mode]);
 
   const handleSaveConfig = async (next: ScannerConfig) => {
     if (!session) return;
+    saveConfigLocally(next);
     if (session.mode === 'LOCAL_DEMO_STREAM') {
       setConfig(next);
       if (localScannerRef.current) {
         const snap = localScannerRef.current.getSnapshot(next);
+        setAssets(snap.assets);
+      }
+      return;
+    }
+    if (session.mode === 'IQ_BROWSER_LIVE') {
+      setConfig(next);
+      if (browserScannerRef.current) {
+        const snap = browserScannerRef.current.getSnapshot(next);
         setAssets(snap.assets);
       }
       return;
@@ -340,7 +610,10 @@ export default function App() {
       });
       if (res.ok) {
         const data = await res.json();
-        if (data.config) setConfig(data.config);
+        if (data.config) {
+          setConfig(data.config);
+          saveConfigLocally(data.config);
+        }
         if (Array.isArray(data.assets)) setAssets(data.assets);
       }
     } catch {
@@ -358,7 +631,9 @@ export default function App() {
     if (!session) return;
     const nextActive = !session.scanningActive;
     setSession((prev) => (prev ? { ...prev, scanningActive: nextActive } : prev));
-    if (session.mode === 'LOCAL_DEMO_STREAM') return;
+    if (session.mode === 'LOCAL_DEMO_STREAM' || session.mode === 'IQ_BROWSER_LIVE') {
+      return;
+    }
     try {
       await fetch('/api/scanner/toggle', {
         method: 'POST',
@@ -376,13 +651,27 @@ export default function App() {
 
   const handleMarkDecision = async (
     alertId: string,
-    decisionNote: 'WATCHED' | 'TRADED_MANUAL' | 'SKIPPED'
+    decisionNote: 'WATCHED' | 'TRADED_MANUAL' | 'SKIPPED',
+    tradeOutcome?: TradeOutcome
   ) => {
     if (!session) return;
-    if (session.mode === 'LOCAL_DEMO_STREAM') {
-      const updated = localScannerRef.current?.markDecision(alertId, decisionNote);
-      if (updated) {
-        setAlerts((prev) => prev.map((a) => (a.id === alertId ? { ...updated } : a)));
+    if (session.mode === 'LOCAL_DEMO_STREAM' || session.mode === 'IQ_BROWSER_LIVE') {
+      const activeScanner =
+        session.mode === 'LOCAL_DEMO_STREAM'
+          ? localScannerRef.current
+          : browserScannerRef.current;
+      const updated = activeScanner?.markDecision(
+        alertId,
+        decisionNote,
+        tradeOutcome
+      );
+      if (updated && activeScanner) {
+        const snap = activeScanner.getSnapshot(localConfigRef.current);
+        const unique = deduplicateAlertsByAsset(snap.alerts);
+        setAlerts(unique);
+        setDecisionRecords(snap.decisionRecords);
+        saveAlertsLocally(unique);
+        saveDecisionRecordsLocally(snap.decisionRecords);
         if (liveBannerAlert?.id === alertId) setLiveBannerAlert(null);
       }
       return;
@@ -395,7 +684,11 @@ export default function App() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${session.token}`,
         },
-        body: JSON.stringify({ acknowledged: true, decisionNote }),
+        body: JSON.stringify({
+          acknowledged: true,
+          decisionNote,
+          ...(tradeOutcome ? { tradeOutcome } : {}),
+        }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -407,50 +700,482 @@ export default function App() {
             setLiveBannerAlert(null);
           }
         }
+        if (Array.isArray(data.decisionRecords)) {
+          setDecisionRecords(data.decisionRecords);
+        }
       }
     } catch {
       // ignore transient errors
     }
   };
 
+  const submitAiSample = async (sample: PatternFeedbackSample) => {
+    if (!session) return;
+
+    if (session.mode === 'LOCAL_DEMO_STREAM' || session.mode === 'IQ_BROWSER_LIVE') {
+      const activeScanner =
+        session.mode === 'LOCAL_DEMO_STREAM'
+          ? localScannerRef.current
+          : browserScannerRef.current;
+      if (activeScanner) {
+        const res = activeScanner.addAiFeedback(sample);
+        const snap = activeScanner.getSnapshot(localConfigRef.current);
+        const unique = deduplicateAlertsByAsset(snap.alerts);
+        setAiSamples(res.aiSamples);
+        saveAiSamplesLocally(res.aiSamples);
+        setAlerts(unique);
+        saveAlertsLocally(unique);
+        setAssets(snap.assets);
+      }
+      return;
+    }
+
+    const optimistic = [
+      ...(sample.alertId
+        ? aiSamples.filter((s) => s.alertId !== sample.alertId)
+        : aiSamples),
+      sample,
+    ].slice(-MAX_AI_TRAINING_SAMPLES);
+    setAiSamples(optimistic);
+    saveAiSamplesLocally(optimistic);
+
+    try {
+      const res = await fetch('/api/ai/feedback', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.token}`,
+        },
+        body: JSON.stringify(sample),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.aiSamples)) {
+          setAiSamples(data.aiSamples);
+          saveAiSamplesLocally(data.aiSamples);
+        }
+        if (Array.isArray(data.alerts)) {
+          setAlerts(deduplicateAlertsByAsset(data.alerts));
+        }
+        if (Array.isArray(data.assets)) {
+          setAssets(data.assets);
+        }
+      }
+    } catch {
+      // keep optimistic local training sample
+    }
+  };
+
+  const handleTrainAiFromChart = async (
+    assetState: ScannedAssetState,
+    verdict: PatternVerdict,
+    forcedDirection?: TrendDirection
+  ): Promise<{ ok: boolean; message?: string }> => {
+    const analysisMatchesDir =
+      Boolean(assetState.analysis.patternFeatures) &&
+      Boolean(assetState.analysis.direction) &&
+      assetState.analysis.directionalEfficiency >= 0.58 &&
+      (!forcedDirection || assetState.analysis.direction === forcedDirection);
+
+    let targetDir: TrendDirection;
+    let features: PatternFeatureVector;
+    let runLength: number;
+    let avgWickRatio: number;
+    let uniformityScore: number;
+    let baseMatchScore: number;
+
+    if (analysisMatchesDir && assetState.analysis.patternFeatures && assetState.analysis.direction) {
+      targetDir = assetState.analysis.direction;
+      features = assetState.analysis.patternFeatures;
+      runLength = assetState.analysis.runLength;
+      avgWickRatio = assetState.analysis.avgWickRatio;
+      uniformityScore = assetState.analysis.uniformityScore;
+      baseMatchScore =
+        assetState.analysis.baseMatchScore ?? assetState.analysis.matchScore;
+    } else {
+      const flow = assessChartFlowForAiTraining(
+        assetState.candles,
+        assetState.analysis.emaValues,
+        config,
+        forcedDirection
+      );
+      if (!flow.ok) {
+        return { ok: false, message: flow.reason };
+      }
+      targetDir = flow.direction;
+      features = flow.features;
+      runLength = flow.runLength;
+      avgWickRatio = flow.avgWickRatio;
+      uniformityScore = flow.uniformityScore;
+      baseMatchScore = flow.baseMatchScore;
+    }
+
+    const key = `${assetState.asset.id}-${assetState.analysis.signalTime ?? 0}`;
+    setRecentChartVerdicts((prev) => ({ ...prev, [key]: verdict }));
+
+    const matchingAlert = alerts.find(
+      (a) =>
+        normalizeAssetHistoryKey(a.assetName, a.assetId) ===
+        normalizeAssetHistoryKey(assetState.asset.name, assetState.asset.id)
+    );
+
+    const sample = createFeedbackSample({
+      alertId: matchingAlert?.id,
+      assetId: assetState.asset.id,
+      assetName: assetState.asset.name,
+      direction: targetDir,
+      verdict,
+      baseMatchScore,
+      aiScoreAtTime: assetState.analysis.aiSimilarityScore,
+      runLength,
+      avgWickRatio,
+      uniformityScore,
+      features,
+    });
+
+    await submitAiSample(sample);
+    return { ok: true };
+  };
+
+  const handleImportAiSamples = async (imported: PatternFeedbackSample[]) => {
+    const mergedMap = new Map<string, PatternFeedbackSample>();
+    for (const s of [...aiSamples, ...imported]) {
+      if (
+        s &&
+        (s.direction === 'UP' || s.direction === 'DOWN') &&
+        s.features &&
+        s.features.directionalEfficiency >= 0.58
+      ) {
+        mergedMap.set(s.id, s);
+      }
+    }
+    const merged = Array.from(mergedMap.values())
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(-MAX_AI_TRAINING_SAMPLES);
+    setAiSamples(merged);
+    saveAiSamplesLocally(merged);
+
+    if (!session) return;
+    if (session.mode === 'LOCAL_DEMO_STREAM' || session.mode === 'IQ_BROWSER_LIVE') {
+      const activeScanner =
+        session.mode === 'LOCAL_DEMO_STREAM'
+          ? localScannerRef.current
+          : browserScannerRef.current;
+      if (activeScanner) {
+        activeScanner.replaceAiSamples(merged);
+        const snap = activeScanner.getSnapshot(localConfigRef.current);
+        setAssets(snap.assets);
+      }
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/ai/sync', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${session.token}`,
+        },
+        body: JSON.stringify({ samples: merged }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.aiSamples)) {
+          setAiSamples(data.aiSamples);
+          saveAiSamplesLocally(data.aiSamples);
+        }
+        if (Array.isArray(data.assets)) setAssets(data.assets);
+      }
+    } catch {
+      // keep local imported samples
+    }
+  };
+
+  const handleTrainAiFromAlert = async (
+    alert: TrendAlert,
+    verdict: PatternVerdict
+  ) => {
+    const matchedAsset = assets.find((a) => a.asset.id === alert.assetId);
+    const features: PatternFeatureVector =
+      alert.patternFeatures ??
+      matchedAsset?.analysis.patternFeatures ?? {
+        runLengthNorm: Math.min(1.6, Math.max(0.3, alert.runLength / 6)),
+        avgWickRatio: alert.avgWickRatio,
+        reverseWickRatio: Math.min(0.4, alert.avgWickRatio * 0.8),
+        uniformityScoreNorm: Math.min(1, Math.max(0, alert.uniformityScore / 100)),
+        avgBodyToMedianRatio: 1,
+        bodyTrendSlope: 1,
+        directionalEfficiency: 0.86,
+        emaDistanceRatio: 0.75,
+        swingScoreNorm: 0.92,
+      };
+
+    const sample = createFeedbackSample({
+      alertId: alert.id,
+      assetId: alert.assetId,
+      assetName: alert.assetName,
+      direction: alert.direction,
+      verdict,
+      baseMatchScore: alert.matchScore ?? alert.uniformityScore,
+      aiScoreAtTime: alert.aiSimilarityScore,
+      runLength: alert.runLength,
+      avgWickRatio: alert.avgWickRatio,
+      uniformityScore: alert.uniformityScore,
+      features,
+    });
+
+    setAlerts((prev) =>
+      prev.map((item) =>
+        item.id === alert.id
+          ? {
+              ...item,
+              aiVerdict: verdict,
+              acknowledged: verdict === 'PASS' ? true : item.acknowledged,
+            }
+          : item
+      )
+    );
+
+    if (liveBannerAlert?.id === alert.id) {
+      if (verdict === 'REJECT') {
+        setLiveBannerAlert(null);
+      } else {
+        setLiveBannerAlert((prev) =>
+          prev ? { ...prev, aiVerdict: verdict, acknowledged: true } : prev
+        );
+      }
+    }
+
+    await submitAiSample(sample);
+  };
+
+  const handleRemoveAiSample = async (sampleId: string) => {
+    if (!session) return;
+    if (session.mode === 'LOCAL_DEMO_STREAM' || session.mode === 'IQ_BROWSER_LIVE') {
+      const activeScanner =
+        session.mode === 'LOCAL_DEMO_STREAM'
+          ? localScannerRef.current
+          : browserScannerRef.current;
+      if (activeScanner) {
+        const res = activeScanner.removeAiSample(sampleId);
+        const snap = activeScanner.getSnapshot(localConfigRef.current);
+        setAiSamples(res.aiSamples);
+        saveAiSamplesLocally(res.aiSamples);
+        setAssets(snap.assets);
+      }
+      return;
+    }
+
+    const nextLocal = aiSamples.filter((s) => s.id !== sampleId);
+    setAiSamples(nextLocal);
+    saveAiSamplesLocally(nextLocal);
+    try {
+      const res = await fetch(`/api/ai/feedback/${encodeURIComponent(sampleId)}`, {
+        method: 'DELETE',
+        credentials: 'same-origin',
+        headers: { Authorization: `Bearer ${session.token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.aiSamples)) {
+          setAiSamples(data.aiSamples);
+          saveAiSamplesLocally(data.aiSamples);
+        }
+        if (Array.isArray(data.assets)) setAssets(data.assets);
+      }
+    } catch {
+      // keep local removal
+    }
+  };
+
+  const handleResetAiSamples = async () => {
+    if (!session) return;
+    setAiSamples([]);
+    saveAiSamplesLocally([]);
+    setRecentChartVerdicts({});
+
+    if (session.mode === 'LOCAL_DEMO_STREAM' || session.mode === 'IQ_BROWSER_LIVE') {
+      const activeScanner =
+        session.mode === 'LOCAL_DEMO_STREAM'
+          ? localScannerRef.current
+          : browserScannerRef.current;
+      if (activeScanner) {
+        activeScanner.clearAiSamples();
+        const snap = activeScanner.getSnapshot(localConfigRef.current);
+        setAssets(snap.assets);
+      }
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/ai/reset', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Authorization: `Bearer ${session.token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.assets)) setAssets(data.assets);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   const handleLogout = async () => {
-    if (session && session.mode !== 'LOCAL_DEMO_STREAM') {
+    if (
+      session &&
+      session.mode !== 'LOCAL_DEMO_STREAM' &&
+      session.mode !== 'IQ_BROWSER_LIVE'
+    ) {
       fetch('/api/auth/logout', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { Authorization: `Bearer ${session.token}` },
       }).catch(() => {});
     }
+    browserScannerRef.current?.disconnect();
+    browserScannerRef.current = null;
+    localScannerRef.current = null;
     setSession(null);
     setAssets([]);
     setAlerts([]);
+    setDecisionRecords([]);
     setLiveBannerAlert(null);
+    setSelectionNotice(null);
+    setSelectedAssetIds([]);
     setWsConnected(false);
   };
 
-  const handleSelectAssetForSlot = (assetId: string) => {
+  const rankedAssetsForSelection = useMemo(
+    () => [...assets].sort((a, b) => compareAssetsByFlowRank(a, b)),
+    [assets]
+  );
+
+  const topRankedAsset = rankedAssetsForSelection[0] ?? null;
+
+  // Fill only unset/invalid slots with top-ranked assets; never auto-overwrite a locked chart!
+  useEffect(() => {
+    if (rankedAssetsForSelection.length === 0) return;
+    const validIds = new Set(assets.map((a) => a.asset.id));
+
+    setSelectedAssetIds((prev) => {
+      const next = [...prev];
+      const used = new Set<string>();
+      let changed = false;
+
+      for (let i = 0; i < chartCount; i++) {
+        const cur = next[i];
+        if (cur && validIds.has(cur) && !used.has(cur)) {
+          used.add(cur);
+        }
+      }
+
+      for (let i = 0; i < chartCount; i++) {
+        const cur = next[i];
+        if (!cur || !validIds.has(cur)) {
+          const candidate =
+            rankedAssetsForSelection.find((item) => !used.has(item.asset.id)) ??
+            rankedAssetsForSelection[i % rankedAssetsForSelection.length];
+          if (candidate && next[i] !== candidate.asset.id) {
+            next[i] = candidate.asset.id;
+            used.add(candidate.asset.id);
+            changed = true;
+          }
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [assets, chartCount, rankedAssetsForSelection]);
+
+  const requestAssetCandlesById = useCallback(
+    (assetId: string) => {
+      if (!session) return;
+      if (session.mode === 'IQ_OPTION_LIVE') {
+        fetch('/api/scanner/select-asset', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${session.token}`,
+          },
+          body: JSON.stringify({ assetId }),
+        }).catch(() => {});
+      } else if (session.mode === 'IQ_BROWSER_LIVE') {
+        browserScannerRef.current?.requestAssetCandles(assetId);
+      }
+    },
+    [session]
+  );
+
+  const handleSelectAssetForSlot = (assetId: string, assetName?: string) => {
+    const normalizedName = assetName?.trim().toLowerCase();
+    const targetHistoryKey = normalizeAssetHistoryKey(assetName ?? '', assetId);
+    const matched =
+      assets.find((a) => a.asset.id === assetId) ??
+      assets.find(
+        (a) =>
+          normalizeAssetHistoryKey(a.asset.name, a.asset.id) === targetHistoryKey
+      ) ??
+      (normalizedName
+        ? assets.find(
+            (a) =>
+              a.asset.name.toLowerCase() === normalizedName ||
+              a.asset.symbol.toLowerCase() === normalizedName
+          )
+        : undefined);
+
+    setActiveTab('scanner');
+    setMobilePanel('chart');
+
+    if (assets.length > 0 && !matched) {
+      setSelectionNotice(
+        `ไม่พบกราฟ "${assetName ?? assetId}" ในตลาดที่เปิดอยู่ตอนนี้ กรุณาเลือกคู่เงินอื่นจากรายการด้านข้าง`
+      );
+      return;
+    }
+
+    const resolvedId = matched ? matched.asset.id : assetId;
+    setSelectionNotice(null);
+
     setSelectedAssetIds((prev) => {
       const copy = [...prev];
       const slot = Math.min(activeSlotIndex, chartCount - 1);
-      copy[slot] = assetId;
+      copy[slot] = resolvedId;
       return copy;
     });
-    setMobilePanel('chart');
+
+    requestAssetCandlesById(resolvedId);
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (chartWorkspaceRef.current) {
+          chartWorkspaceRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        } else {
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+      });
+    });
   };
 
   const visibleSlotAssets = useMemo(() => {
     if (assets.length === 0) return [];
     const byId = new Map(assets.map((a) => [a.asset.id, a]));
+    const fallbackPool =
+      rankedAssetsForSelection.length > 0 ? rankedAssetsForSelection : assets;
     const result: ScannedAssetState[] = [];
     for (let i = 0; i < chartCount; i++) {
       const wantedId = selectedAssetIds[i];
       const found =
         (wantedId ? byId.get(wantedId) : undefined) ??
-        assets[i % assets.length];
+        fallbackPool[i % fallbackPool.length];
       if (found) result.push(found);
     }
     return result;
-  }, [assets, chartCount, selectedAssetIds]);
+  }, [assets, chartCount, rankedAssetsForSelection, selectedAssetIds]);
 
   const unacknowledgedCount = useMemo(
     () => alerts.filter((a) => !a.acknowledged).length,
@@ -517,12 +1242,37 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleTrainAiFromAlert(liveBannerAlert, 'PASS')}
+              className={`px-3 py-1 text-xs font-semibold rounded inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
+                liveBannerAlert.aiVerdict === 'PASS'
+                  ? 'bg-emerald-500 text-[#052E16]'
+                  : 'bg-[#16C784] hover:bg-emerald-400 text-[#052E16]'
+              }`}
+              title="กดเมื่อทรงกราฟสวยผ่านเงื่อนไข เพื่อให้ AI เรียนรู้และคัดทรงคล้ายกันได้ดีขึ้น"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>
+                {liveBannerAlert.aiVerdict === 'PASS'
+                  ? 'ผ่านแล้ว (AI จำทรงนี้)'
+                  : 'ผ่าน (สอน AI)'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleTrainAiFromAlert(liveBannerAlert, 'REJECT')}
+              className="px-2.5 py-1 text-xs font-medium rounded border border-rose-400/40 bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+              title="บอก AI ว่าทรงกราฟนี้ยังไม่ผ่านเกณฑ์"
+            >
+              <XCircle className="w-3.5 h-3.5" />
+              <span>ไม่ผ่าน</span>
+            </button>
             <button
               type="button"
               onClick={() => {
-                handleSelectAssetForSlot(liveBannerAlert.assetId);
-                setActiveTab('scanner');
+                handleSelectAssetForSlot(liveBannerAlert.assetId, liveBannerAlert.assetName);
                 handleMarkDecision(liveBannerAlert.id, 'WATCHED');
               }}
               className="px-3 py-1 text-xs font-medium rounded bg-[#162033] hover:bg-[#1E2B44] text-[#F8FAFC] cursor-pointer whitespace-nowrap"
@@ -543,7 +1293,7 @@ export default function App() {
       {activeTab === 'scanner' && (
         <main className="flex-1 flex flex-col lg:flex-row min-h-0">
           {/* Left / Center Chart Workspace */}
-          <section className="flex-1 min-w-0 flex flex-col">
+          <section ref={chartWorkspaceRef} className="flex-1 min-w-0 flex flex-col">
             {/* Broker-Style Control Strip matching user's 9 attached screenshots */}
             <div className="px-3 lg:px-5 py-2 border-b border-[#1D273B] bg-[#0D1422] space-y-1.5">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -551,7 +1301,11 @@ export default function App() {
                   <div className="px-2.5 py-1 rounded-lg bg-[#11192B] border border-[#23304A] text-[11px] sm:text-xs font-semibold text-[#E2E8F0]">
                     {session.mode === 'IQ_OPTION_LIVE'
                       ? `REAL · ${session.email}`
-                      : 'DEMO สด'}
+                      : session.mode === 'IQ_BROWSER_LIVE'
+                        ? `REAL (ตรง) · ${session.email}`
+                        : session.mode === 'LOCAL_DEMO_STREAM'
+                          ? 'DEMO ในเครื่อง'
+                          : 'DEMO สด'}
                   </div>
 
                   <span className="text-xs sm:text-sm font-bold font-mono-tabular text-[#F5C451] whitespace-nowrap">
@@ -607,6 +1361,123 @@ export default function App() {
                     ))}
                   </div>
 
+                  <div className="flex items-center gap-1.5 bg-[#0B111E] border border-[#1E293B] rounded-lg px-2 py-1">
+                    <label
+                      htmlFor="m15-window-select"
+                      className="text-[11px] text-[#94A3B8] whitespace-nowrap"
+                    >
+                      กรอบสแกน
+                    </label>
+                    <select
+                      id="m15-window-select"
+                      aria-label="กรอบเวลาสแกน M15 (ไม่เกิน 20 แท่ง)"
+                      value={String(Math.min(20, Math.max(15, config.scanWindowBars ?? 15)))}
+                      onChange={(e) => {
+                        const bars = Math.min(20, Math.max(15, Number(e.target.value) || 15));
+                        handleFilterChange({ scanWindowBars: bars });
+                      }}
+                      className="bg-transparent text-[11px] sm:text-xs font-semibold text-[#60A5FA] focus:outline-none cursor-pointer"
+                    >
+                      <option value="15" className="bg-[#0D1422] text-[#F8FAFC]">
+                        M15 (15 แท่ง)
+                      </option>
+                      <option value="18" className="bg-[#0D1422] text-[#F8FAFC]">
+                        M15 (18 แท่ง)
+                      </option>
+                      <option value="20" className="bg-[#0D1422] text-[#F8FAFC]">
+                        M15 (20 แท่ง)
+                      </option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 bg-[#0B111E] border border-[#1E293B] rounded-lg px-2 py-1">
+                    <label
+                      htmlFor="quick-lookback-select"
+                      className="text-[11px] text-[#94A3B8] whitespace-nowrap"
+                    >
+                      เทียบล่าสุด
+                    </label>
+                    <select
+                      id="quick-lookback-select"
+                      aria-label="จำนวนแท่งเทียนย้อนหลังที่เปรียบเทียบ"
+                      value={
+                        config.targetMinCandles === 4 && config.targetMaxCandles === 6
+                          ? '4-6'
+                          : config.targetMinCandles === 4 && config.targetMaxCandles === 4
+                            ? '4'
+                            : config.targetMinCandles === 5 && config.targetMaxCandles === 6
+                              ? '5'
+                              : config.targetMinCandles === 6 && config.targetMaxCandles === 6
+                                ? '6'
+                                : config.targetMinCandles === 3 && config.targetMaxCandles === 5
+                                  ? '3'
+                                  : 'custom'
+                      }
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === '4-6') {
+                          handleFilterChange({ targetMinCandles: 4, targetMaxCandles: 6 });
+                        } else if (v === '4') {
+                          handleFilterChange({ targetMinCandles: 4, targetMaxCandles: 4 });
+                        } else if (v === '5') {
+                          handleFilterChange({ targetMinCandles: 5, targetMaxCandles: 6 });
+                        } else if (v === '6') {
+                          handleFilterChange({ targetMinCandles: 6, targetMaxCandles: 6 });
+                        } else if (v === '3') {
+                          handleFilterChange({ targetMinCandles: 3, targetMaxCandles: 5 });
+                        }
+                      }}
+                      className="bg-transparent text-[11px] sm:text-xs font-semibold text-[#F8FAFC] focus:outline-none cursor-pointer"
+                    >
+                      <option value="4-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                        4–6 แท่ง
+                      </option>
+                      <option value="4" className="bg-[#0D1422] text-[#F8FAFC]">
+                        4 แท่งล่าสุด
+                      </option>
+                      <option value="5" className="bg-[#0D1422] text-[#F8FAFC]">
+                        5 แท่งล่าสุด
+                      </option>
+                      <option value="6" className="bg-[#0D1422] text-[#F8FAFC]">
+                        6 แท่งล่าสุด
+                      </option>
+                      <option value="3" className="bg-[#0D1422] text-[#F8FAFC]">
+                        3 แท่ง (ไว)
+                      </option>
+                      {!(
+                        (config.targetMinCandles === 4 && config.targetMaxCandles === 6) ||
+                        (config.targetMinCandles === 4 && config.targetMaxCandles === 4) ||
+                        (config.targetMinCandles === 5 && config.targetMaxCandles === 6) ||
+                        (config.targetMinCandles === 6 && config.targetMaxCandles === 6) ||
+                        (config.targetMinCandles === 3 && config.targetMaxCandles === 5)
+                      ) && (
+                        <option value="custom" className="bg-[#0D1422] text-[#F8FAFC]">
+                          {config.targetMinCandles}–{config.targetMaxCandles} แท่ง
+                        </option>
+                      )}
+                    </select>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleFilterChange({
+                        realtimeAlertImmediate: !config.realtimeAlertImmediate,
+                      })
+                    }
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
+                      config.realtimeAlertImmediate
+                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+                        : 'bg-[#162033] border-[#273652] text-[#94A3B8]'
+                    }`}
+                    title="แจ้งเตือนแบบเรียลไทม์ทันทีเมื่อแท่งล่าสุดเข้าเงื่อนไข โดยไม่ต้องรอให้จบแท่ง"
+                  >
+                    <Zap className="w-3.5 h-3.5" />
+                    <span>
+                      {config.realtimeAlertImmediate ? 'เตือนทันที' : 'รอจบแท่ง'}
+                    </span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
@@ -652,6 +1523,17 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Quick Chart Search Bar (type chart name to open & teach AI) */}
+              <div className="pt-0.5">
+                <ChartQuickSearch
+                  assets={assets}
+                  activeAssetId={
+                    visibleSlotAssets[Math.min(activeSlotIndex, chartCount - 1)]?.asset.id
+                  }
+                  onSelectAsset={handleSelectAssetForSlot}
+                />
+              </div>
+
               {/* Scan Progress Line matching screenshot sub-bar */}
               <div className="hidden sm:flex flex-wrap items-center justify-between gap-2 text-xs text-[#94A3B8]">
                 <div className="flex flex-wrap items-center gap-2">
@@ -660,24 +1542,61 @@ export default function App() {
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>
-                    เกณฑ์ {config.targetMinCandles}–{config.targetMaxCandles} แท่ง (ไส้ ≤{' '}
-                    {Math.round(config.maxWickRatio * 100)}%)
+                    กรอบ M15 ({Math.min(20, Math.max(15, config.scanWindowBars ?? 15))} แท่ง) · เกณฑ์ย้อนหลัง{' '}
+                    {config.targetMinCandles === config.targetMaxCandles
+                      ? `${config.targetMinCandles} แท่ง`
+                      : `${config.targetMinCandles}–${config.targetMaxCandles} แท่ง`}{' '}
+                    (สีเดียว · สม่ำเสมอ · ไส้ ≤ {Math.round(config.maxWickRatio * 100)}% · {config.minMatchScore}%+)
                   </span>
                   <span aria-hidden="true">·</span>
-                  <span>รอแท่ง {nextMinuteText}</span>
+                  <span>
+                    {config.realtimeAlertImmediate ? 'แจ้งเตือนทันที' : `รอแท่ง ${nextMinuteText}`}
+                  </span>
                   <span aria-hidden="true">·</span>
                   <span className="text-[#E2E8F0] font-medium">
                     พบสัญญาณ {matchCount} คู่
                   </span>
+                  {config.aiLearningEnabled && (
+                    <>
+                      <span aria-hidden="true">·</span>
+                      <span className="inline-flex items-center gap-1 text-indigo-300 font-medium">
+                        <Brain className="w-3.5 h-3.5" />
+                        <span>
+                          {aiModel.passCount > 0
+                            ? `AI จำ ${aiModel.passCount} ทรง`
+                            : 'AI พร้อมเรียนรู้'}
+                        </span>
+                      </span>
+                    </>
+                  )}
+                  {topRankedAsset &&
+                    topRankedAsset.analysis.status === 'MATCH' &&
+                    visibleSlotAssets[Math.min(activeSlotIndex, chartCount - 1)]?.asset.id !==
+                      topRankedAsset.asset.id && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleSelectAssetForSlot(
+                            topRankedAsset.asset.id,
+                            topRankedAsset.asset.name
+                          )
+                        }
+                        className="px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-medium transition-colors cursor-pointer"
+                      >
+                        อันดับ 1 ตอนนี้: {topRankedAsset.asset.name} ({topRankedAsset.analysis.matchScore}%) · สลับดู
+                      </button>
+                    )}
                 </div>
                 <span>
-                  {session.mode === 'IQ_OPTION_LIVE'
+                  {session.mode === 'IQ_OPTION_LIVE' || session.mode === 'IQ_BROWSER_LIVE'
                     ? session.iqConnected
                       ? session.iqStatusMessage
                       : 'กำลังเชื่อม IQ Option...'
-                    : wsConnected
-                      ? 'สตรีมข้อมูล 1 นาทีออนไลน์'
-                      : 'กำลังเชื่อมสตรีม...'}
+                    : session.mode === 'LOCAL_DEMO_STREAM'
+                      ? 'สแกนอิสระในเครื่อง (ไม่ง้อเซิร์ฟเวอร์)'
+                      : wsConnected
+                        ? 'สตรีมข้อมูล 1 นาทีออนไลน์'
+                        : 'กำลังเชื่อมสตรีม...'}
                 </span>
               </div>
 
@@ -698,15 +1617,15 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setMobilePanel('list')}
-                  className={`py-2 px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+                  className={`py-2 px-2.5 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap ${
                     mobilePanel === 'list'
                       ? 'bg-[#2563EB] text-white'
                       : 'bg-[#0B111E] border border-[#1E293B] text-[#94A3B8]'
                   }`}
                 >
-                  <ListFilter className="w-3.5 h-3.5" />
+                  <ListFilter className="w-3.5 h-3.5 shrink-0" />
                   <span>
-                    รายชื่อคู่เงิน ({assets.length})
+                    คู่เงิน ({assets.length})
                     {matchCount > 0 ? ` · เข้า ${matchCount}` : ''}
                   </span>
                 </button>
@@ -719,6 +1638,23 @@ export default function App() {
                 mobilePanel === 'chart' ? 'block' : 'hidden lg:block'
               }`}
             >
+              {selectionNotice && (
+                <div
+                  role="alert"
+                  className="mb-3 px-3.5 py-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 flex items-center justify-between gap-3 text-xs text-amber-200"
+                >
+                  <span>{selectionNotice}</span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectionNotice(null)}
+                    aria-label="ปิดการแจ้งเตือน"
+                    className="p-1 rounded hover:bg-amber-500/20 text-amber-300 cursor-pointer shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               {visibleSlotAssets.length === 0 ? (
                 <div className="h-[420px] rounded-xl border border-[#1E293B] bg-[#0D1422] flex items-center justify-center text-sm text-[#94A3B8]">
                   กำลังโหลดข้อมูลแท่งเทียน 1 นาที...
@@ -732,16 +1668,28 @@ export default function App() {
                       : 'grid-cols-1 xl:grid-cols-2'
                   }`}
                 >
-                  {visibleSlotAssets.map((assetState, idx) => (
-                    <CandlestickChart
-                      key={`${idx}-${assetState.asset.id}`}
-                      assetState={assetState}
-                      slotLabel={chartCount > 1 ? `กราฟ #${idx + 1}` : undefined}
-                      isActiveSlot={chartCount > 1 && activeSlotIndex === idx}
-                      compact={chartCount > 1}
-                      onActivateSlot={() => setActiveSlotIndex(idx)}
-                    />
-                  ))}
+                  {visibleSlotAssets.map((assetState, idx) => {
+                    const verdictKey = `${assetState.asset.id}-${
+                      assetState.analysis.signalTime ?? 0
+                    }`;
+                    return (
+                      <CandlestickChart
+                        key={`${idx}-${assetState.asset.id}`}
+                        assetState={assetState}
+                        slotLabel={chartCount > 1 ? `กราฟ #${idx + 1}` : undefined}
+                        isActiveSlot={chartCount > 1 && activeSlotIndex === idx}
+                        compact={chartCount > 1}
+                        scanWindowBars={config.scanWindowBars}
+                        targetMinCandles={config.targetMinCandles}
+                        targetMaxCandles={config.targetMaxCandles}
+                        minMatchScore={config.minMatchScore}
+                        trainedVerdict={recentChartVerdicts[verdictKey] ?? null}
+                        onTrainAiPattern={handleTrainAiFromChart}
+                        onActivateSlot={() => setActiveSlotIndex(idx)}
+                        onRetryCandles={requestAssetCandlesById}
+                      />
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -762,6 +1710,8 @@ export default function App() {
               onSelectAsset={handleSelectAssetForSlot}
               categoryFilter={config.categoryFilter}
               directionFilter={config.directionFilter}
+              targetMinCandles={config.targetMinCandles}
+              targetMaxCandles={config.targetMaxCandles}
               onChangeFilters={handleFilterChange}
             />
           </div>
@@ -772,11 +1722,11 @@ export default function App() {
         <main className="flex-1 overflow-y-auto">
           <AlertsHistoryView
             alerts={alerts}
-            onInspectAsset={(assetId) => {
-              handleSelectAssetForSlot(assetId);
-              setActiveTab('scanner');
+            onInspectAsset={(assetId, assetName) => {
+              handleSelectAssetForSlot(assetId, assetName);
             }}
             onMarkDecision={handleMarkDecision}
+            onTrainAiFromAlert={handleTrainAiFromAlert}
           />
         </main>
       )}
@@ -785,7 +1735,16 @@ export default function App() {
         <main className="flex-1 overflow-y-auto">
           <ScannerSettingsView
             config={config}
+            alerts={alerts}
+            decisionRecords={decisionRecords}
+            aiSamples={aiSamples}
+            aiModel={aiModel}
             onSaveConfig={handleSaveConfig}
+            onRecordOutcome={handleMarkDecision}
+            onRemoveAiSample={handleRemoveAiSample}
+            onResetAiSamples={handleResetAiSamples}
+            onImportAiSamples={handleImportAiSamples}
+            onInspectAsset={handleSelectAssetForSlot}
           />
         </main>
       )}

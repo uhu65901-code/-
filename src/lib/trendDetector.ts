@@ -1,6 +1,9 @@
+import { extractPatternFeatures, scorePatternWithAi } from './aiPatternLearner.ts';
 import type {
+  AiPatternModel,
   Candle,
   MatchStatus,
+  PatternFeedbackSample,
   ScannerConfig,
   TrendAnalysis,
   TrendDirection,
@@ -62,6 +65,8 @@ function emptyAnalysis(emaValues: number[], reason: string): TrendAnalysis {
     signalTime: null,
     avgWickRatio: 0,
     uniformityScore: 0,
+    matchScore: 0,
+    directionalEfficiency: 0,
     avgBodyToMedianRatio: 0,
     counterCandles: 0,
     swingScore: 0,
@@ -71,57 +76,57 @@ function emptyAnalysis(emaValues: number[], reason: string): TrendAnalysis {
 }
 
 /**
- * Analyzes 1-minute candlesticks for a clean, steady, short-bodied,
- * minimal-wick flowing trend of 5-6 candles (not overextended, not swinging).
+ * Evaluates a slice of 1-minute candlesticks (up to the last bar in `slice`)
+ * for a clean, steady, small-bodied, minimal-wick, same-color, non-sideways flowing trend.
  */
-export function analyzeCandleTrend(
-  candles: Candle[],
+function analyzeCandleSlice(
+  slice: Candle[],
+  fullEmaValues: number[],
   config: ScannerConfig,
-  options: { includeLastCandle?: boolean } = {}
+  aiContext?: { model: AiPatternModel; samples: PatternFeedbackSample[] }
 ): TrendAnalysis {
-  const emaValues = calculateEMA(candles, 7);
-  const effectiveEnd = options.includeLastCandle
-    ? candles.length
-    : Math.max(0, candles.length - 1);
-
-  if (effectiveEnd < Math.max(7, config.targetMinCandles)) {
-    return emptyAnalysis(emaValues, 'ข้อมูลแท่งเทียน 1 นาที ยังไม่เพียงพอ');
+  if (slice.length < Math.max(6, config.targetMinCandles)) {
+    return emptyAnalysis(fullEmaValues, 'ข้อมูลแท่งเทียน M15 ยังไม่เพียงพอ');
   }
 
-  const closedCandles = candles.slice(0, effectiveEnd);
-  const baselineSlice = closedCandles.slice(-26);
-  const baselineBodies = baselineSlice
+  // Strictly scan only the M15 window (15-20 latest 1m candles)
+  const windowBars = Math.min(20, Math.max(15, Math.round(config.scanWindowBars ?? 15)));
+  const windowStart = Math.max(0, slice.length - windowBars);
+  const windowSlice = slice.slice(windowStart);
+  const windowEma = fullEmaValues.slice(windowStart, slice.length);
+
+  const baselineBodies = windowSlice
     .map((c) => Math.abs(c.close - c.open))
     .filter((b) => b > 0);
   const medianBody = median(baselineBodies);
 
   if (medianBody <= 0) {
-    return emptyAnalysis(emaValues, 'กราฟไม่มีการเคลื่อนไหว');
+    return emptyAnalysis(fullEmaValues, 'กราฟไม่มีการเคลื่อนไหว');
   }
 
-  const latestClosed = closedCandles[closedCandles.length - 1];
-  const latestMetrics = getCandleMetrics(latestClosed);
+  const latestBar = windowSlice[windowSlice.length - 1];
+  const latestMetrics = getCandleMetrics(latestBar);
   if (latestMetrics.dir === 'DOJI') {
-    return emptyAnalysis(emaValues, 'แท่งล่าสุดเป็น Doji ยังไม่เลือกทาง');
+    return emptyAnalysis(fullEmaValues, 'แท่งล่าสุดเป็น Doji ยังไม่เลือกทาง');
   }
 
   const targetDir: TrendDirection = latestMetrics.dir;
 
   if (config.directionFilter !== 'BOTH' && config.directionFilter !== targetDir) {
     return emptyAnalysis(
-      emaValues,
+      fullEmaValues,
       `กราฟกำลังไหล${targetDir === 'UP' ? 'ขึ้น' : 'ลง'} (ถูกกรองตามทิศทางที่ตั้งไว้)`
     );
   }
 
-  // Walk backwards from the latest closed candle to find the contiguous flowing run
-  const maxInspect = Math.min(closedCandles.length, config.targetMaxCandles + 5);
+  // Walk backwards from the latest bar within the M15 window (<= 20 bars)
+  const maxInspect = Math.min(windowSlice.length, config.targetMaxCandles + 5);
   const runIndices: number[] = [];
   let counterCount = 0;
 
   for (let offset = 0; offset < maxInspect; offset++) {
-    const idx = closedCandles.length - 1 - offset;
-    const c = closedCandles[idx];
+    const idx = windowSlice.length - 1 - offset;
+    const c = windowSlice[idx];
     const m = getCandleMetrics(c);
 
     if (m.dir === targetDir) {
@@ -129,10 +134,10 @@ export function analyzeCandleTrend(
     } else if (
       offset > 0 &&
       counterCount < config.maxCounterCandles &&
-      m.body <= medianBody * 0.55
+      m.body <= medianBody * 0.5
     ) {
       const prevIdx = idx - 1;
-      if (prevIdx >= 0 && getCandleMetrics(closedCandles[prevIdx]).dir === targetDir) {
+      if (prevIdx >= 0 && getCandleMetrics(windowSlice[prevIdx]).dir === targetDir) {
         counterCount++;
         runIndices.unshift(idx);
       } else {
@@ -144,40 +149,43 @@ export function analyzeCandleTrend(
   }
 
   const runLength = runIndices.length;
+  const globalMatchedIndices = runIndices.map((idx) => idx + windowStart);
 
-  // Check if overextended beyond 5-6 candles
+  // Check if overextended beyond configured max candles
   if (runLength > config.targetMaxCandles) {
     return {
       status: 'OVEREXTENDED',
       direction: targetDir,
       runLength,
-      matchedIndices: runIndices,
-      signalIndex: runIndices[runIndices.length - 1] ?? null,
-      signalPrice: latestClosed.close,
-      signalTime: latestClosed.time,
+      matchedIndices: globalMatchedIndices,
+      signalIndex: globalMatchedIndices[globalMatchedIndices.length - 1] ?? null,
+      signalPrice: latestBar.close,
+      signalTime: latestBar.time,
       avgWickRatio: 0,
       uniformityScore: 0,
+      matchScore: 0,
+      directionalEfficiency: 0,
       avgBodyToMedianRatio: 0,
       counterCandles: counterCount,
       swingScore: 0,
-      emaValues,
+      emaValues: fullEmaValues,
       reasons: [
         `เทรนด์ไหลต่อเนื่อง ${runLength} แท่ง เกินกรอบ ${config.targetMaxCandles} แท่งแล้ว`,
       ],
     };
   }
 
-  if (runLength < Math.max(3, config.targetMinCandles - 1)) {
-    return emptyAnalysis(emaValues, `เพิ่งเรียงตัว ${runLength} แท่ง รอการยืนยัน`);
+  if (runLength < Math.max(2, config.targetMinCandles - 1)) {
+    return emptyAnalysis(fullEmaValues, `เพิ่งเรียงตัว ${runLength} แท่ง รอการยืนยัน`);
   }
 
-  // Evaluate quality metrics on the directional candles in the run
-  const runCandles = runIndices.map((i) => closedCandles[i]);
+  // Evaluate quality metrics across the recent compared candles in M15 window
+  const runCandles = runIndices.map((i) => windowSlice[i]);
   const runMetrics = runCandles.map(getCandleMetrics);
   const sameDirMetrics = runMetrics.filter((m) => m.dir === targetDir);
 
   if (sameDirMetrics.length === 0) {
-    return emptyAnalysis(emaValues, 'ไม่พบแท่งเทียนทิศทางเดียวกัน');
+    return emptyAnalysis(fullEmaValues, 'ไม่พบแท่งเทียนทิศทางเดียวกัน');
   }
 
   const bodies = sameDirMetrics.map((m) => m.body);
@@ -186,103 +194,355 @@ export function analyzeCandleTrend(
     bodies.reduce((sum, v) => sum + (v - meanBody) ** 2, 0) / bodies.length;
   const stdDev = Math.sqrt(variance);
   const cv = meanBody > 0 ? stdDev / meanBody : 1;
-  const uniformityScore = Math.max(0, Math.min(100, Math.round((1 - cv) * 100)));
+  const maxBody = Math.max(...bodies);
+  const minBody = Math.min(...bodies);
+  const bodySpreadRatio = minBody > 0 ? maxBody / minBody : 99;
+  const spreadPenalty = bodySpreadRatio > 2.3 ? Math.min(28, (bodySpreadRatio - 2.3) * 18) : 0;
+  const uniformityScore = Math.max(
+    0,
+    Math.min(100, Math.round((1 - cv) * 100 - spreadPenalty))
+  );
 
   const avgWickRatio =
     sameDirMetrics.reduce((sum, m) => sum + m.wickRatio, 0) / sameDirMetrics.length;
   const maxSingleWickRatio = Math.max(...sameDirMetrics.map((m) => m.wickRatio));
+  const hasExcessiveReverseWick = sameDirMetrics.some((m) => {
+    const revWick = targetDir === 'UP' ? m.lowerWick : m.upperWick;
+    return revWick > Math.max(m.body * 0.5, medianBody * 0.25);
+  });
 
   const avgBodyToMedianRatio = meanBody / medianBody;
-  const maxSingleBodyRatio = Math.max(...bodies) / medianBody;
-  const minSingleBodyRatio = Math.min(...bodies) / medianBody;
+  const maxSingleBodyRatio = maxBody / medianBody;
+  const minSingleBodyRatio = minBody / medianBody;
+  const hasUnevenPeerBar =
+    bodySpreadRatio > 2.35 ||
+    maxBody > meanBody * 1.58 ||
+    minBody < meanBody * 0.45;
 
   let smoothSteps = 0;
   let totalSteps = 0;
   for (let i = 1; i < runCandles.length; i++) {
     const prev = runCandles[i - 1];
+    const prevM = runMetrics[i - 1];
     const curr = runCandles[i];
+    const currM = runMetrics[i];
     const prevMid = (prev.open + prev.close) / 2;
     totalSteps++;
+    if (currM.dir !== targetDir) {
+      const noCounterSwing =
+        targetDir === 'UP'
+          ? curr.low >= prevMid - medianBody * 0.25
+          : curr.high <= prevMid + medianBody * 0.25;
+      if (noCounterSwing) smoothSteps++;
+      continue;
+    }
+    const prevAnchorOpen = prevM.dir !== targetDir ? prev.close : prev.open;
+    const prevAnchorClose = prevM.dir !== targetDir ? prev.open : prev.close;
     if (targetDir === 'UP') {
-      const closesHigher = curr.close >= prev.close - medianBody * 0.15;
-      const noDeepSwing = curr.low >= Math.min(prev.open, prevMid) - medianBody * 0.25;
-      if (closesHigher && noDeepSwing) smoothSteps++;
+      const closesHigher = curr.close > prevAnchorClose - medianBody * 0.08;
+      const opensClean = curr.open >= prevAnchorOpen - medianBody * 0.22;
+      const noDeepSwing = curr.low >= Math.min(prev.open, prevMid) - medianBody * 0.24;
+      if (closesHigher && opensClean && noDeepSwing) smoothSteps++;
     } else {
-      const closesLower = curr.close <= prev.close + medianBody * 0.15;
-      const noDeepSwing = curr.high <= Math.max(prev.open, prevMid) + medianBody * 0.25;
-      if (closesLower && noDeepSwing) smoothSteps++;
+      const closesLower = curr.close < prevAnchorClose + medianBody * 0.08;
+      const opensClean = curr.open <= prevAnchorOpen + medianBody * 0.22;
+      const noDeepSwing = curr.high <= Math.max(prev.open, prevMid) + medianBody * 0.24;
+      if (closesLower && opensClean && noDeepSwing) smoothSteps++;
     }
   }
   const swingScore =
     totalSteps > 0 ? Math.round((smoothSteps / totalSteps) * 100) : 100;
 
+  // Anti-sideways directional flow & EMA alignment checks
+  const firstRunBar = runCandles[0];
+  const lastRunBar = runCandles[runCandles.length - 1];
+  const netMove =
+    targetDir === 'UP'
+      ? lastRunBar.close - firstRunBar.open
+      : firstRunBar.open - lastRunBar.close;
+  const totalCandleRanges = runCandles.reduce(
+    (sum, c) => sum + Math.max(c.high - c.low, Math.abs(c.close - c.open)),
+    0
+  );
+  const directionalEfficiency =
+    totalCandleRanges > 0
+      ? Math.max(0, Math.min(1, netMove / totalCandleRanges))
+      : 0;
+
+  let emaAlignedCount = 0;
+  for (const idx of runIndices) {
+    const c = windowSlice[idx];
+    const e = windowEma[idx];
+    if (!Number.isFinite(e)) continue;
+    if (targetDir === 'UP' ? c.close >= e : c.close <= e) {
+      emaAlignedCount++;
+    }
+  }
+  const emaAlignedRatio =
+    runIndices.length > 0 ? emaAlignedCount / runIndices.length : 0;
+  const firstEma = windowEma[runIndices[0]];
+  const lastEma = windowEma[runIndices[runIndices.length - 1]];
+  const emaSlopeAligned =
+    Number.isFinite(firstEma) && Number.isFinite(lastEma)
+      ? targetDir === 'UP'
+        ? lastEma > firstEma
+        : lastEma < firstEma
+      : true;
+
+  // Reject sideways consolidation inside the M15 window (15-20 bars):
+  // the run must break out of prior M15 cluster & cover meaningful share of the M15 range
+  const preBars = windowSlice.slice(0, runIndices[0]);
+  const m15High = Math.max(...windowSlice.map((b) => b.high));
+  const m15Low = Math.min(...windowSlice.map((b) => b.low));
+  const m15Span = Math.max(m15High - m15Low, medianBody);
+  const m15NetDominance = m15Span > 0 ? netMove / m15Span : 0;
+  let breaksPriorRange = true;
+  if (preBars.length >= 3) {
+    const preHigh = Math.max(...preBars.map((b) => b.high));
+    const preLow = Math.min(...preBars.map((b) => b.low));
+    const preMid = (preHigh + preLow) / 2;
+    const preSpan = Math.max(preHigh - preLow, medianBody);
+    breaksPriorRange =
+      (targetDir === 'UP'
+        ? lastRunBar.close >= preHigh - preSpan * 0.08 ||
+          lastRunBar.close - preMid >= medianBody * 1.6
+        : lastRunBar.close <= preLow + preSpan * 0.08 ||
+          preMid - lastRunBar.close >= medianBody * 1.6) &&
+      m15NetDominance >= 0.32;
+  }
+
+  const wickScore = Math.max(0, Math.min(100, Math.round(100 - avgWickRatio * 72)));
+  const effScore = Math.max(0, Math.min(100, Math.round(directionalEfficiency * 108)));
+  const emaTrendScore = Math.max(
+    0,
+    Math.min(100, Math.round(emaAlignedRatio * 70 + (emaSlopeAligned ? 30 : 0)))
+  );
+  const baseMatchScore = Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(
+        uniformityScore * 0.28 +
+          wickScore * 0.22 +
+          swingScore * 0.2 +
+          effScore * 0.16 +
+          emaTrendScore * 0.14
+      )
+    )
+  );
+
+  const patternFeatures = extractPatternFeatures({
+    runCandles,
+    emaValues: windowEma,
+    runIndices,
+    direction: targetDir,
+    medianBody,
+    avgWickRatio,
+    uniformityScore,
+    avgBodyToMedianRatio,
+    directionalEfficiency,
+    swingScore,
+  });
+
+  const aiResult =
+    config.aiLearningEnabled && aiContext
+      ? scorePatternWithAi(
+          patternFeatures,
+          aiContext.model,
+          aiContext.samples,
+          config.aiInfluencePercent ?? 35
+        )
+      : { aiSimilarityScore: undefined, aiDeltaScore: 0, aiLabel: undefined };
+
+  const matchScore = Math.max(
+    0,
+    Math.min(100, baseMatchScore + aiResult.aiDeltaScore)
+  );
+
   const reasons: string[] = [];
   let passesQuality = true;
 
-  if (avgWickRatio > config.maxWickRatio || maxSingleWickRatio > config.maxWickRatio * 1.75) {
+  if (
+    avgWickRatio > config.maxWickRatio ||
+    maxSingleWickRatio > config.maxWickRatio * 1.65 ||
+    hasExcessiveReverseWick
+  ) {
     passesQuality = false;
     reasons.push(
       `ไส้เทียนเฉลี่ย ${(avgWickRatio * 100).toFixed(0)}% สูงกว่าเกณฑ์ ${(config.maxWickRatio * 100).toFixed(0)}%`
     );
   } else {
-    reasons.push(`ไส้เทียนน้อยมาก เฉลี่ย ${(avgWickRatio * 100).toFixed(1)}%`);
+    reasons.push(`ไส้เล็กน้อยสวยงาม เฉลี่ย ${(avgWickRatio * 100).toFixed(1)}%`);
   }
 
-  if (uniformityScore < config.minUniformityScore) {
+  if (uniformityScore < config.minUniformityScore || hasUnevenPeerBar) {
     passesQuality = false;
-    reasons.push(`ขนาดแท่งเทียนไม่สม่ำเสมอ (${uniformityScore}/100)`);
+    reasons.push(
+      `ขนาดแท่งเทียนต่างกันมากเกินไป (${uniformityScore}/100)`
+    );
   } else {
-    reasons.push(`แท่งเทียนเรียงสม่ำเสมอ ${uniformityScore}/100`);
+    reasons.push(`ขนาดแท่งสม่ำเสมอดี ${uniformityScore}/100`);
   }
 
   if (
     maxSingleBodyRatio > config.maxBodyToMedianRatio ||
-    avgBodyToMedianRatio > config.maxBodyToMedianRatio * 0.9
+    avgBodyToMedianRatio > config.maxBodyToMedianRatio * 0.94
   ) {
     passesQuality = false;
-    reasons.push('พบแท่งยาวผิดปกติ (ไม่เข้าเงื่อนไขแท่งสั้น)');
-  } else if (minSingleBodyRatio < config.minBodyToMedianRatio * 0.5) {
+    reasons.push('พบแท่งยาวกระชากเกินเกณฑ์');
+  } else if (minSingleBodyRatio < config.minBodyToMedianRatio) {
     passesQuality = false;
-    reasons.push('มีแท่งเล็กเกินไปจนกราฟแบน');
+    reasons.push('มีแท่งเล็กสั้นจนแทบไม่มีเนื้อเทียน');
   } else {
-    reasons.push(`แท่งสั้นกระชับ (${avgBodyToMedianRatio.toFixed(2)}x ค่าเฉลี่ย)`);
+    reasons.push(`ขนาดเนื้อเทียนพอดี (${avgBodyToMedianRatio.toFixed(2)}x ค่าเฉลี่ย)`);
   }
 
-  if (swingScore < 75) {
+  if (swingScore < 88) {
     passesQuality = false;
     reasons.push('กราฟมีการสวิงย้อนตัวระหว่างแท่ง');
   } else {
-    reasons.push(`ไหลต่อเนื่องไม่สวิง (${swingScore}%)`);
+    reasons.push(`เรียงตัวสีเดียวสวย (${swingScore}%)`);
+  }
+
+  if (
+    directionalEfficiency < 0.7 ||
+    netMove < medianBody * Math.max(1.8, runLength * 0.48) ||
+    !emaSlopeAligned ||
+    emaAlignedRatio < 0.75 ||
+    !breaksPriorRange
+  ) {
+    passesQuality = false;
+    reasons.push('กราฟยังแกว่งออกข้าง (Sideways) ในกรอบ M15 หรือยังไม่ไหลตามเส้น EMA');
+  } else {
+    reasons.push(`ไหลสวยชัดเจนในกรอบ M15 (ความชัน ${Math.round(directionalEfficiency * 100)}%)`);
+  }
+
+  if (aiResult.aiLabel && aiResult.aiDeltaScore <= -7) {
+    passesQuality = false;
+    reasons.push(aiResult.aiLabel);
+  } else if (aiResult.aiLabel) {
+    reasons.push(aiResult.aiLabel);
+  }
+
+  const requiredMatchScore = config.minMatchScore ?? 86;
+  if (matchScore < requiredMatchScore) {
+    passesQuality = false;
+    reasons.push(`คะแนนรวม ${matchScore}% ต่ำกว่าเกณฑ์คัดกรอง ${requiredMatchScore}%`);
+  } else {
+    reasons.push(`เข้าเกณฑ์คุณภาพดี ${matchScore}%`);
   }
 
   let status: MatchStatus = 'NONE';
   if (passesQuality) {
     if (runLength >= config.targetMinCandles && runLength <= config.targetMaxCandles) {
       status = 'MATCH';
-    } else if (runLength === config.targetMinCandles - 1 && runLength >= 3) {
+    } else if (runLength === config.targetMinCandles - 1 && runLength >= 2) {
       status = 'FORMING';
     }
+  } else if (
+    runLength === config.targetMinCandles - 1 &&
+    runLength >= 2 &&
+    !hasUnevenPeerBar &&
+    !hasExcessiveReverseWick &&
+    swingScore >= 88 &&
+    matchScore >= Math.max(76, requiredMatchScore - 10) &&
+    directionalEfficiency >= 0.7 &&
+    emaSlopeAligned &&
+    emaAlignedRatio >= 0.75 &&
+    avgWickRatio <= config.maxWickRatio &&
+    uniformityScore >= config.minUniformityScore
+  ) {
+    status = 'FORMING';
   }
 
   return {
     status,
     direction: targetDir,
     runLength,
-    matchedIndices: runIndices,
+    matchedIndices: globalMatchedIndices,
     signalIndex:
       status === 'MATCH' || status === 'FORMING'
-        ? runIndices[runIndices.length - 1] ?? null
+        ? globalMatchedIndices[globalMatchedIndices.length - 1] ?? null
         : null,
     signalPrice:
-      status === 'MATCH' || status === 'FORMING' ? latestClosed.close : null,
+      status === 'MATCH' || status === 'FORMING' ? latestBar.close : null,
     signalTime:
-      status === 'MATCH' || status === 'FORMING' ? latestClosed.time : null,
+      status === 'MATCH' || status === 'FORMING' ? latestBar.time : null,
     avgWickRatio,
     uniformityScore,
+    matchScore,
+    baseMatchScore,
+    directionalEfficiency,
     avgBodyToMedianRatio,
     counterCandles: counterCount,
     swingScore,
-    emaValues,
+    emaValues: fullEmaValues,
     reasons,
+    patternFeatures,
+    aiSimilarityScore: aiResult.aiSimilarityScore,
+    aiDeltaScore: aiResult.aiDeltaScore,
+    aiLabel: aiResult.aiLabel,
   };
+}
+
+/**
+ * Analyzes 1-minute candlesticks for a clean, steady, small-bodied,
+ * minimal-wick, same-color flowing trend over the latest configured candles.
+ * When `realtimeAlertImmediate` (or `options.includeLastCandle`) is enabled,
+ * evaluates the live forming candle in real time so signals trigger immediately
+ * without waiting for the 1-minute timer to finish.
+ */
+export function analyzeCandleTrend(
+  candles: Candle[],
+  config: ScannerConfig,
+  options: {
+    includeLastCandle?: boolean;
+    aiModel?: AiPatternModel;
+    aiSamples?: PatternFeedbackSample[];
+  } = {}
+): TrendAnalysis {
+  const emaValues = calculateEMA(candles, 7);
+  const useImmediate =
+    options.includeLastCandle !== undefined
+      ? options.includeLastCandle
+      : config.realtimeAlertImmediate;
+  const aiContext =
+    options.aiModel && options.aiSamples
+      ? { model: options.aiModel, samples: options.aiSamples }
+      : undefined;
+
+  if (!useImmediate) {
+    const closedOnly = candles.slice(0, Math.max(0, candles.length - 1));
+    return analyzeCandleSlice(closedOnly, emaValues, config, aiContext);
+  }
+
+  const liveResult = analyzeCandleSlice(candles, emaValues, config, aiContext);
+  if (liveResult.status === 'MATCH' || liveResult.status === 'OVEREXTENDED') {
+    return liveResult;
+  }
+
+  // If the current live bar just opened (tiny/doji body), keep any active closed-bar
+  // match or forming signal instead of flickering to NONE during the first few seconds.
+  if (candles.length >= 2) {
+    const recentBodies = candles
+      .slice(-Math.min(20, Math.max(15, config.scanWindowBars ?? 15)), -1)
+      .map((c) => Math.abs(c.close - c.open))
+      .filter((b) => b > 0);
+    const medianBody = median(recentBodies);
+    const liveBar = candles[candles.length - 1];
+    const liveBody = Math.abs(liveBar.close - liveBar.open);
+    if (medianBody > 0 && liveBody < medianBody * 0.35) {
+      const closedResult = analyzeCandleSlice(
+        candles.slice(0, -1),
+        emaValues,
+        config,
+        aiContext
+      );
+      if (closedResult.status === 'MATCH' || closedResult.status === 'FORMING') {
+        return closedResult;
+      }
+    }
+  }
+
+  return liveResult;
 }

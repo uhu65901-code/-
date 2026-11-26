@@ -1,14 +1,35 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  ArrowDown,
+  ArrowUp,
+  Brain,
+  CheckCircle2,
+  RotateCcw,
+  XCircle,
+  ZoomIn,
+  ZoomOut,
+} from 'lucide-react';
+import { assessChartFlowForAiTraining } from '../lib/aiPatternLearner';
 import { getCandleMetrics } from '../lib/trendDetector';
-import { ScannedAssetState } from '../lib/types';
+import { PatternVerdict, ScannedAssetState, TrendDirection } from '../lib/types';
 
 interface CandlestickChartProps {
   assetState: ScannedAssetState;
   slotLabel?: string;
   isActiveSlot?: boolean;
   compact?: boolean;
+  scanWindowBars?: number;
+  targetMinCandles?: number;
+  targetMaxCandles?: number;
+  minMatchScore?: number;
+  trainedVerdict?: PatternVerdict | null;
+  onTrainAiPattern?: (
+    assetState: ScannedAssetState,
+    verdict: PatternVerdict,
+    forcedDirection?: TrendDirection
+  ) => { ok: boolean; message?: string } | Promise<{ ok: boolean; message?: string }>;
   onActivateSlot?: () => void;
+  onRetryCandles?: (assetId: string) => void;
 }
 
 function formatTime(unixSec: number): string {
@@ -30,39 +51,81 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   slotLabel,
   isActiveSlot = false,
   compact = false,
+  scanWindowBars = 15,
+  targetMinCandles = 4,
+  targetMaxCandles = 6,
+  minMatchScore = 86,
+  trainedVerdict = null,
+  onTrainAiPattern,
   onActivateSlot,
+  onRetryCandles,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [size, setSize] = useState({ width: 720, height: compact ? 290 : 440 });
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  // Interactive Zoom (number of visible bars: 12..60) & Pan offset (0 = latest)
-  const [zoomBars, setZoomBars] = useState<number>(compact ? 24 : 30);
+  const m15DefaultBars = Math.min(20, Math.max(15, Math.round(scanWindowBars)));
+  // Interactive Zoom locked within M15 clarity range (8..20 bars) & Pan offset (0 = latest)
+  const [zoomBars, setZoomBars] = useState<number>(m15DefaultBars);
   const [panOffset, setPanOffset] = useState<number>(0);
+  const [aiFeedbackNotice, setAiFeedbackNotice] = useState<{
+    type: 'ok' | 'warn';
+    text: string;
+  } | null>(null);
   const dragStateRef = useRef<{ startX: number; startPan: number } | null>(null);
   const pinchStateRef = useRef<{ startDist: number; startZoom: number } | null>(null);
 
+  const safeDecimals = Number.isFinite(assetState.asset.decimals)
+    ? Math.min(8, Math.max(0, Math.round(assetState.asset.decimals)))
+    : 5;
+
   useEffect(() => {
     setPanOffset(0);
+    setAiFeedbackNotice(null);
   }, [assetState.asset.id]);
 
   useEffect(() => {
+    setZoomBars(m15DefaultBars);
+    setPanOffset(0);
+  }, [m15DefaultBars]);
+
+  useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+
+    const measure = () => {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 10 && rect.height > 10) {
+        const w = Math.max(260, Math.floor(rect.width));
+        const h = Math.max(240, Math.floor(rect.height));
+        setSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+      }
+    };
+
+    measure();
+    const rafId = window.requestAnimationFrame(measure);
+    window.addEventListener('resize', measure);
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const w = Math.max(260, Math.floor(entry.contentRect.width));
-        const h = Math.max(240, Math.floor(entry.contentRect.height));
-        setSize({ width: w, height: h });
+        if (entry.contentRect.width > 10 && entry.contentRect.height > 10) {
+          const w = Math.max(260, Math.floor(entry.contentRect.width));
+          const h = Math.max(240, Math.floor(entry.contentRect.height));
+          setSize((prev) => (prev.width === w && prev.height === h ? prev : { width: w, height: h }));
+        }
       }
     });
     observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', measure);
+      observer.disconnect();
+    };
+  }, [assetState.asset.id, assetState.candles.length]);
 
   const totalLen = assetState.candles.length;
-  const clampedZoom = Math.min(Math.max(12, zoomBars), Math.max(12, totalLen));
+  const maxAllowedZoom = Math.min(20, Math.max(8, totalLen));
+  const clampedZoom = Math.min(maxAllowedZoom, Math.max(8, zoomBars));
   const maxPan = Math.max(0, totalLen - clampedZoom);
   const clampedPan = Math.min(maxPan, Math.max(0, panOffset));
   const visibleEnd = totalLen - clampedPan;
@@ -110,8 +173,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     maxPrice += rawRange * 0.14;
 
     const samplePriceLen = Math.max(
-      maxPrice.toFixed(assetState.asset.decimals).length,
-      minPrice.toFixed(assetState.asset.decimals).length
+      maxPrice.toFixed(safeDecimals).length,
+      minPrice.toFixed(safeDecimals).length
     );
     const padLeft = 14;
     const padRight = Math.max(74, Math.min(106, Math.ceil(samplePriceLen * 7.2) + 18));
@@ -129,8 +192,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     const priceToY = (p: number) =>
       padTop + ((maxPrice - p) / priceRange) * plotH;
 
-    const slotW = plotW / Math.max(visibleCandles.length + 2, 10);
-    const candleW = Math.max(4, Math.min(24, slotW * 0.64));
+    const slotW = plotW / Math.max(visibleCandles.length + 1.5, 8);
+    const candleW = Math.max(6, Math.min(34, slotW * 0.68));
     const idxToX = (i: number) => padLeft + (i + 0.5) * slotW;
 
     // Subtle dashed horizontal & vertical grid lines
@@ -152,7 +215,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
       ctx.fillStyle = '#94A3B8';
       ctx.fillText(
-        priceVal.toFixed(assetState.asset.decimals),
+        priceVal.toFixed(safeDecimals),
         size.width - padRight + 8,
         y
       );
@@ -242,13 +305,20 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       ctx.beginPath();
       ctx.strokeStyle = '#F5C451';
       ctx.lineWidth = 2.1;
+      let startedEma = false;
       for (let i = 0; i < visibleEma.length; i++) {
+        const val = visibleEma[i];
+        if (!Number.isFinite(val)) continue;
         const x = idxToX(i);
-        const y = priceToY(visibleEma[i]);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
+        const y = priceToY(val);
+        if (!startedEma) {
+          ctx.moveTo(x, y);
+          startedEma = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
       }
-      ctx.stroke();
+      if (startedEma) ctx.stroke();
     }
 
     // Signal Price Horizontal Line + Triangle Marker (matching screenshots)
@@ -273,7 +343,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
       // Label above/below signal line
       const sigLabel = `${isUp ? 'สัญญาณ CALL' : 'สัญญาณ PUT'} ${assetState.analysis.signalPrice.toFixed(
-        assetState.asset.decimals
+        safeDecimals
       )} · ${assetState.analysis.runLength} แท่ง`;
       ctx.fillStyle = sigColor;
       ctx.font = '600 11px "IBM Plex Sans Thai", "JetBrains Mono", sans-serif';
@@ -338,7 +408,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(
-      lastBar.close.toFixed(assetState.asset.decimals),
+      lastBar.close.toFixed(safeDecimals),
       size.width - padRight + 6,
       lastY
     );
@@ -359,6 +429,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     clampedPan,
     hoverIndex,
     matchedSet,
+    safeDecimals,
     signalRelIdx,
     size,
     visibleCandles,
@@ -376,11 +447,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const sampleLen = assetState.lastPrice.toFixed(assetState.asset.decimals).length;
+    const sampleLen = assetState.lastPrice.toFixed(safeDecimals).length;
     const padLeft = 14;
     const padRight = Math.max(74, Math.min(106, Math.ceil(sampleLen * 7.2) + 18));
     const plotW = Math.max(100, size.width - padLeft - padRight);
-    const slotW = plotW / Math.max(visibleCandles.length + 2, 10);
+    const slotW = plotW / Math.max(visibleCandles.length + 1.5, 8);
     const idx = Math.floor((x - padLeft) / slotW);
     if (idx >= 0 && idx < visibleCandles.length) {
       setHoverIndex(idx);
@@ -391,8 +462,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
 
   const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? 4 : -4;
-    setZoomBars((prev) => Math.min(Math.max(12, prev + delta), Math.max(12, totalLen)));
+    const delta = e.deltaY > 0 ? 2 : -2;
+    setZoomBars((prev) => Math.min(20, Math.max(8, prev + delta)));
   };
 
   const handleTouchStart = (e: React.TouchEvent<HTMLCanvasElement>) => {
@@ -412,11 +483,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       };
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.touches[0].clientX - rect.left;
-      const sampleLen = assetState.lastPrice.toFixed(assetState.asset.decimals).length;
+      const sampleLen = assetState.lastPrice.toFixed(safeDecimals).length;
       const padLeft = 14;
       const padRight = Math.max(74, Math.min(106, Math.ceil(sampleLen * 7.2) + 18));
       const plotW = Math.max(100, size.width - padLeft - padRight);
-      const slotW = plotW / Math.max(visibleCandles.length + 2, 10);
+      const slotW = plotW / Math.max(visibleCandles.length + 1.5, 8);
       const idx = Math.floor((x - padLeft) / slotW);
       if (idx >= 0 && idx < visibleCandles.length) {
         setHoverIndex(idx);
@@ -432,7 +503,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       if (pinchStateRef.current.startDist > 0) {
         const scale = pinchStateRef.current.startDist / Math.max(10, dist);
         const nextZoom = Math.round(pinchStateRef.current.startZoom * scale);
-        setZoomBars(Math.min(Math.max(12, nextZoom), Math.max(12, totalLen)));
+        setZoomBars(Math.min(20, Math.max(8, nextZoom)));
       }
       return;
     }
@@ -463,6 +534,54 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const isForming = assetState.analysis.status === 'FORMING';
   const dir = assetState.analysis.direction;
 
+  const flowPreview = useMemo(
+    () =>
+      assessChartFlowForAiTraining(
+        assetState.candles,
+        assetState.analysis.emaValues,
+        {
+          scanWindowBars: m15DefaultBars,
+          targetMinCandles,
+          targetMaxCandles,
+        }
+      ),
+    [
+      assetState.candles,
+      assetState.analysis.emaValues,
+      m15DefaultBars,
+      targetMinCandles,
+      targetMaxCandles,
+    ]
+  );
+
+  const detectedFlowDir: TrendDirection | null =
+    assetState.analysis.direction &&
+    assetState.analysis.patternFeatures &&
+    assetState.analysis.directionalEfficiency >= 0.58
+      ? assetState.analysis.direction
+      : flowPreview.ok
+        ? flowPreview.direction
+        : null;
+
+  const handleTrainClick = async (
+    verdict: PatternVerdict,
+    forcedDirection?: TrendDirection
+  ) => {
+    if (!onTrainAiPattern) return;
+    const res = await onTrainAiPattern(assetState, verdict, forcedDirection);
+    if (res.ok) {
+      setAiFeedbackNotice({
+        type: 'ok',
+        text:
+          verdict === 'PASS'
+            ? 'บันทึกทรงเทรนด์นี้ลงในอุปกรณ์แล้ว'
+            : 'บันทึกว่าไม่ผ่านลงในอุปกรณ์แล้ว',
+      });
+    } else if (res.message) {
+      setAiFeedbackNotice({ type: 'warn', text: res.message });
+    }
+  };
+
   return (
     <div
       onClick={onActivateSlot}
@@ -483,17 +602,23 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           <span className="font-bold text-[#F8FAFC] truncate">
             {assetState.asset.name}
           </span>
+          <span
+            data-testid="m15-window-badge"
+            className="px-1.5 py-0.5 rounded bg-[#162033] border border-[#273652] text-[10px] font-mono-tabular font-semibold text-[#60A5FA] whitespace-nowrap shrink-0"
+          >
+            M15 · {visibleCandles.length} แท่ง
+          </span>
           <span className="text-[#94A3B8] whitespace-nowrap shrink-0">
             {assetState.asset.category === 'BINARY' ? 'Binary' : 'Digital'} · {assetState.asset.payoutPercent}%
           </span>
           {!compact && inspectedCandle && inspectedMetrics && (
             <div className="hidden sm:flex items-center gap-2 font-mono-tabular text-[#94A3B8] whitespace-nowrap">
               <span className="text-[#CBD5E1]">{formatTime(inspectedCandle.time)}</span>
-              <span>O {inspectedCandle.open.toFixed(assetState.asset.decimals)}</span>
-              <span>C {inspectedCandle.close.toFixed(assetState.asset.decimals)}</span>
+              <span>O {inspectedCandle.open.toFixed(safeDecimals)}</span>
+              <span>C {inspectedCandle.close.toFixed(safeDecimals)}</span>
               <span
                 className={
-                  inspectedMetrics.wickRatio <= 0.26
+                  inspectedMetrics.wickRatio <= 0.25
                     ? 'text-emerald-400'
                     : 'text-amber-400'
                 }
@@ -504,7 +629,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           )}
         </div>
 
-        {/* Zoom Controls */}
+        {/* Zoom Controls (M15 <= 20 bars) */}
         <div
           className="flex items-center gap-1 shrink-0"
           onClick={(e) => e.stopPropagation()}
@@ -512,7 +637,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           <button
             type="button"
             aria-label={`ซูมเข้ากราฟ ${assetState.asset.name}`}
-            onClick={() => setZoomBars((prev) => Math.max(12, prev - 5))}
+            onClick={() => setZoomBars((prev) => Math.max(8, prev - 2))}
             className="p-2 md:p-1.5 rounded bg-[#162033] hover:bg-[#1E2B44] border border-[#273652] text-[#CBD5E1] cursor-pointer"
             title="ซูมเข้า (ดูแท่งใกล้ขึ้น)"
           >
@@ -522,10 +647,10 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             type="button"
             aria-label={`ซูมออกกราฟ ${assetState.asset.name}`}
             onClick={() =>
-              setZoomBars((prev) => Math.min(Math.max(12, totalLen), prev + 5))
+              setZoomBars((prev) => Math.min(20, prev + 2))
             }
             className="p-2 md:p-1.5 rounded bg-[#162033] hover:bg-[#1E2B44] border border-[#273652] text-[#CBD5E1] cursor-pointer"
-            title="ซูมออก (ดูแท่งกว้างขึ้น)"
+            title="ซูมออก (สูงสุด 20 แท่งในกรอบ M15)"
           >
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
@@ -533,11 +658,11 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             type="button"
             aria-label={`รีเซ็ตการซูม ${assetState.asset.name}`}
             onClick={() => {
-              setZoomBars(compact ? 24 : 30);
+              setZoomBars(m15DefaultBars);
               setPanOffset(0);
             }}
             className="p-2 md:p-1.5 rounded bg-[#162033] hover:bg-[#1E2B44] border border-[#273652] text-[#CBD5E1] cursor-pointer"
-            title="รีเซ็ตมุมมอง"
+            title={`รีเซ็ตมุมมอง M15 (${m15DefaultBars} แท่ง)`}
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
@@ -552,48 +677,72 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             compact ? 'h-[250px] sm:h-[270px]' : 'h-[320px] sm:h-[360px] lg:h-[440px]'
           }`}
         >
-          <canvas
-            ref={canvasRef}
-            data-testid={`candlestick-canvas-${assetState.asset.id}`}
-            onMouseDown={(e) => {
-              dragStateRef.current = { startX: e.clientX, startPan: clampedPan };
-            }}
-            onMouseUp={() => {
-              dragStateRef.current = null;
-            }}
-            onMouseMove={handleMouseMove}
-            onMouseLeave={() => {
-              dragStateRef.current = null;
-              setHoverIndex(null);
-            }}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-            onTouchCancel={handleTouchEnd}
-            onWheel={handleWheel}
-            className="w-full h-full block cursor-grab active:cursor-grabbing touch-pan-y"
-          />
+          {visibleCandles.length === 0 ? (
+            <div className="w-full h-full flex flex-col items-center justify-center gap-2.5 px-4 text-center">
+              <div className="text-sm font-medium text-[#CBD5E1]">
+                กำลังดึงแท่งเทียน 1 นาทีของ {assetState.asset.name}...
+              </div>
+              <div className="text-xs text-[#64748B]">
+                หากคู่นี้ปิดตลาดหรือยังไม่เปิดเทรด 1 นาที กราฟจะไม่มีแท่งเทียนแสดง
+              </div>
+              {onRetryCandles && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRetryCandles(assetState.asset.id);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-[#162033] hover:bg-[#1E2B44] border border-[#273652] text-xs font-medium text-[#60A5FA] cursor-pointer"
+                >
+                  ดึงแท่งเทียนอีกครั้ง
+                </button>
+              )}
+            </div>
+          ) : (
+            <canvas
+              ref={canvasRef}
+              data-testid={`candlestick-canvas-${assetState.asset.id}`}
+              data-visible-bars={visibleCandles.length}
+              onMouseDown={(e) => {
+                dragStateRef.current = { startX: e.clientX, startPan: clampedPan };
+              }}
+              onMouseUp={() => {
+                dragStateRef.current = null;
+              }}
+              onMouseMove={handleMouseMove}
+              onMouseLeave={() => {
+                dragStateRef.current = null;
+                setHoverIndex(null);
+              }}
+              onTouchStart={handleTouchStart}
+              onTouchMove={handleTouchMove}
+              onTouchEnd={handleTouchEnd}
+              onTouchCancel={handleTouchEnd}
+              onWheel={handleWheel}
+              className="w-full h-full block cursor-grab active:cursor-grabbing touch-pan-y"
+            />
+          )}
         </div>
 
-        {/* Right Info Panel matching user's 9 attached screenshots */}
+        {/* Right Info Panel matching user's reference screenshots */}
         <div
           className={`${
             compact ? 'md:w-[175px]' : 'md:w-[210px]'
-          } border-t md:border-t-0 md:border-l border-[#1A2438] bg-[#0B111E] p-3.5 flex flex-row md:flex-col justify-between gap-3 shrink-0`}
+          } border-t md:border-t-0 md:border-l border-[#1A2438] bg-[#0B111E] p-3 sm:p-3.5 flex flex-row md:flex-col justify-between gap-2.5 sm:gap-3 shrink-0 min-w-0`}
         >
-          <div className="space-y-2.5">
+          <div className="space-y-2 min-w-0 flex-1 md:flex-none">
             <div>
               <div className="text-sm font-bold text-[#F8FAFC] truncate">
                 {assetState.asset.name}
               </div>
-              <div className="text-xs text-[#94A3B8]">
+              <div className="text-xs text-[#94A3B8] truncate">
                 {assetState.asset.symbol} · 1 นาที
               </div>
             </div>
 
-            <div className="p-2.5 rounded-lg bg-[#141D2F] border border-[#1E293B]">
+            <div className="p-2 sm:p-2.5 rounded-lg bg-[#141D2F] border border-[#1E293B]">
               <div className="text-[11px] text-[#94A3B8]">หมดอายุ</div>
-              <div className="text-lg font-bold font-mono-tabular text-[#F8FAFC]">
+              <div className="text-base sm:text-lg font-bold font-mono-tabular text-[#F8FAFC]">
                 {formatNextMinute(latestClosedTime)}
               </div>
               <div className="text-[11px] font-mono-tabular text-amber-300 mt-0.5">
@@ -602,6 +751,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
             </div>
 
             <div className="hidden md:block text-xs space-y-1 text-[#94A3B8]">
+              <div className="flex justify-between">
+                <span>เข้าเงื่อนไข</span>
+                <span
+                  className={`font-mono-tabular font-semibold ${
+                    assetState.analysis.matchScore >= minMatchScore
+                      ? 'text-[#16C784]'
+                      : 'text-[#E2E8F0]'
+                  }`}
+                >
+                  {assetState.analysis.matchScore}%
+                </span>
+              </div>
               <div className="flex justify-between">
                 <span>ชุดเทรนด์</span>
                 <span className="font-mono-tabular text-[#E2E8F0]">
@@ -620,58 +781,184 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                   {assetState.analysis.uniformityScore}/100
                 </span>
               </div>
+              {assetState.analysis.aiSimilarityScore !== undefined && (
+                <div className="flex justify-between">
+                  <span>ความคล้าย AI</span>
+                  <span
+                    className={`font-mono-tabular font-semibold ${
+                      assetState.analysis.aiSimilarityScore >= 75
+                        ? 'text-indigo-300'
+                        : 'text-[#94A3B8]'
+                    }`}
+                  >
+                    {assetState.analysis.aiSimilarityScore}%
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Reference CALL/PUT Indicator Card (Manual decision only, matching screenshot bottom-right block) */}
-          <div
-            className={`p-3 rounded-lg flex flex-col items-center justify-center text-center shrink-0 min-w-[130px] ${
-              isMatch && dir === 'UP'
-                ? 'bg-[#16C784] text-[#052E16]'
-                : isMatch && dir === 'DOWN'
-                  ? 'bg-[#F45B69] text-white'
-                  : isForming && dir === 'UP'
-                    ? 'bg-emerald-950/70 border border-emerald-500/40 text-emerald-300'
-                    : isForming && dir === 'DOWN'
-                      ? 'bg-rose-950/70 border border-rose-500/40 text-rose-300'
-                      : 'bg-[#141D2F] border border-[#1E293B] text-[#94A3B8]'
-            }`}
-          >
-            {isMatch && dir === 'UP' && (
-              <>
-                <div className="text-sm font-bold flex items-center gap-1">
-                  <ArrowUp className="w-4 h-4" />
-                  <span>CALL (ซื้อ)</span>
+          {/* Reference CALL/PUT Indicator Card + AI Pattern Training Buttons */}
+          <div className="flex flex-col gap-2 flex-1 min-w-0 sm:flex-none sm:min-w-[140px] md:w-full">
+            <div
+              className={`p-2.5 sm:p-3 rounded-lg flex flex-col items-center justify-center text-center w-full ${
+                isMatch && dir === 'UP'
+                  ? 'bg-[#16C784] text-[#052E16]'
+                  : isMatch && dir === 'DOWN'
+                    ? 'bg-[#F45B69] text-white'
+                    : isForming && dir === 'UP'
+                      ? 'bg-emerald-950/70 border border-emerald-500/40 text-emerald-300'
+                      : isForming && dir === 'DOWN'
+                        ? 'bg-rose-950/70 border border-rose-500/40 text-rose-300'
+                        : 'bg-[#141D2F] border border-[#1E293B] text-[#94A3B8]'
+              }`}
+            >
+              {isMatch && dir === 'UP' && (
+                <>
+                  <div className="text-sm font-bold flex items-center gap-1">
+                    <ArrowUp className="w-4 h-4 shrink-0" />
+                    <span>CALL (ซื้อ)</span>
+                  </div>
+                  <div className="text-[11px] font-medium mt-0.5">
+                    เข้า {assetState.analysis.matchScore}% · {assetState.analysis.runLength} แท่ง
+                  </div>
+                </>
+              )}
+              {isMatch && dir === 'DOWN' && (
+                <>
+                  <div className="text-sm font-bold flex items-center gap-1">
+                    <ArrowDown className="w-4 h-4 shrink-0" />
+                    <span>PUT (ขาย)</span>
+                  </div>
+                  <div className="text-[11px] font-medium mt-0.5">
+                    เข้า {assetState.analysis.matchScore}% · {assetState.analysis.runLength} แท่ง
+                  </div>
+                </>
+              )}
+              {isForming && (
+                <>
+                  <div className="text-xs font-semibold">
+                    ก่อตัว {assetState.analysis.runLength} แท่ง ({assetState.analysis.matchScore}%)
+                  </div>
+                  <div className="text-[11px] mt-0.5">
+                    รอครบ{' '}
+                    {targetMinCandles === targetMaxCandles
+                      ? `${targetMinCandles}`
+                      : `${targetMinCandles}–${targetMaxCandles}`}{' '}
+                    แท่ง
+                  </div>
+                </>
+              )}
+              {!isMatch && !isForming && (
+                <>
+                  <div className="text-xs font-medium">รอสัญญาณ</div>
+                  <div className="text-[11px] mt-0.5">
+                    {assetState.analysis.reasons[0]?.includes('ไซด์เวย์')
+                      ? 'กราฟไซด์เวย์'
+                      : `คัดเฉพาะ ≥ ${minMatchScore}% (${assetState.analysis.matchScore}%)`}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {onTrainAiPattern && assetState.candles.length >= 8 && (
+              <div
+                className="p-2 rounded-lg bg-[#101829] border border-[#1E293B] space-y-1.5 w-full"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-center justify-between gap-1 text-[10px]">
+                  <span className="inline-flex items-center gap-1 font-semibold text-indigo-300">
+                    <Brain className="w-3 h-3 shrink-0" />
+                    <span>สอน AI (เฉพาะขึ้น/ลง)</span>
+                  </span>
+                  {detectedFlowDir ? (
+                    <span
+                      className={`font-semibold ${
+                        detectedFlowDir === 'UP'
+                          ? 'text-emerald-400'
+                          : 'text-rose-400'
+                      }`}
+                    >
+                      {detectedFlowDir === 'UP' ? 'เทรนด์ขึ้น' : 'เทรนด์ลง'}
+                    </span>
+                  ) : (
+                    <span className="text-amber-300">ไซด์เวย์</span>
+                  )}
                 </div>
-                <div className="text-[11px] font-medium mt-0.5">
-                  เข้าเกณฑ์ {assetState.analysis.runLength} แท่ง · กดเอง
-                </div>
-              </>
-            )}
-            {isMatch && dir === 'DOWN' && (
-              <>
-                <div className="text-sm font-bold flex items-center gap-1">
-                  <ArrowDown className="w-4 h-4" />
-                  <span>PUT (ขาย)</span>
-                </div>
-                <div className="text-[11px] font-medium mt-0.5">
-                  เข้าเกณฑ์ {assetState.analysis.runLength} แท่ง · กดเอง
-                </div>
-              </>
-            )}
-            {isForming && (
-              <>
-                <div className="text-xs font-semibold">
-                  ก่อตัว {assetState.analysis.runLength} แท่ง
-                </div>
-                <div className="text-[11px] mt-0.5">รอครบ 5–6 แท่ง</div>
-              </>
-            )}
-            {!isMatch && !isForming && (
-              <>
-                <div className="text-xs font-medium">รอสัญญาณ</div>
-                <div className="text-[11px] mt-0.5">ยังไม่เข้า 5–6 แท่ง</div>
-              </>
+
+                {detectedFlowDir ? (
+                  <div className="flex items-center gap-1.5 w-full">
+                    <button
+                      type="button"
+                      onClick={() => handleTrainClick('PASS', detectedFlowDir)}
+                      aria-label={`ผ่าน (${detectedFlowDir === 'UP' ? 'ขึ้น' : 'ลง'}) · สอน AI ${assetState.asset.name}`}
+                      className={`flex-1 py-1.5 px-2 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1 border transition-colors cursor-pointer whitespace-nowrap ${
+                        trainedVerdict === 'PASS'
+                          ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
+                          : 'bg-[#14231F] hover:bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                      }`}
+                      title="สอน AI ว่ากราฟไหลเป็นเทรนด์แบบนี้คือผ่านเงื่อนไข (เก็บในอุปกรณ์)"
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                      <span>
+                        {trainedVerdict === 'PASS'
+                          ? 'ผ่านแล้ว'
+                          : `ผ่าน (${detectedFlowDir === 'UP' ? 'ขึ้น' : 'ลง'})`}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleTrainClick('REJECT', detectedFlowDir)}
+                      aria-label={`ไม่ผ่าน ทรงกราฟ ${assetState.asset.name}`}
+                      className={`py-1.5 px-2 rounded-lg text-[11px] font-medium inline-flex items-center justify-center gap-1 border transition-colors cursor-pointer whitespace-nowrap ${
+                        trainedVerdict === 'REJECT'
+                          ? 'bg-rose-500/25 border-rose-400 text-rose-200'
+                          : 'bg-[#141D2F] hover:bg-rose-500/15 border-[#273652] text-[#94A3B8] hover:text-rose-300'
+                      }`}
+                      title="บอก AI ว่าทรงแบบนี้ยังไม่ผ่าน"
+                    >
+                      <XCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>ไม่ผ่าน</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <div className="text-[10px] leading-snug text-[#94A3B8]">
+                      กราฟนี้ยังไม่เป็นเทรนด์ไหลขึ้น/ลงชัดเจน (AI ไม่รับสอนกราฟไซด์เวย์)
+                    </div>
+                    <div className="grid grid-cols-2 gap-1">
+                      <button
+                        type="button"
+                        onClick={() => handleTrainClick('PASS', 'UP')}
+                        aria-label={`สอนเทรนด์ขึ้น · ${assetState.asset.name}`}
+                        className="py-1 px-1.5 rounded bg-[#141D2F] hover:bg-emerald-500/15 border border-[#273652] text-[10px] font-medium text-emerald-300 cursor-pointer whitespace-nowrap"
+                      >
+                        สอนเทรนด์ขึ้น
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleTrainClick('PASS', 'DOWN')}
+                        aria-label={`สอนเทรนด์ลง · ${assetState.asset.name}`}
+                        className="py-1 px-1.5 rounded bg-[#141D2F] hover:bg-rose-500/15 border border-[#273652] text-[10px] font-medium text-rose-300 cursor-pointer whitespace-nowrap"
+                      >
+                        สอนเทรนด์ลง
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {aiFeedbackNotice && (
+                  <div
+                    className={`text-[10px] leading-snug px-1.5 py-1 rounded ${
+                      aiFeedbackNotice.type === 'ok'
+                        ? 'bg-emerald-500/10 text-emerald-300'
+                        : 'bg-amber-500/10 text-amber-300'
+                    }`}
+                  >
+                    {aiFeedbackNotice.text}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

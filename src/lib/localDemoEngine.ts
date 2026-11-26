@@ -1,16 +1,24 @@
+import { buildAiPatternModel } from './aiPatternLearner';
+import { compareAssetsByFlowRank } from './assetRanking';
 import { CatalogSeedAsset, IQ_OPTION_ASSETS } from './assetsCatalog';
+import { normalizeAssetHistoryKey } from './performanceStats';
 import { analyzeCandleTrend } from './trendDetector';
 import {
+  AiPatternModel,
   Candle,
+  DecisionRecord,
   DEFAULT_SCANNER_CONFIG,
+  MAX_AI_TRAINING_SAMPLES,
+  PatternFeedbackSample,
   ScannedAssetState,
   ScannerConfig,
+  TradeOutcome,
   TrendAlert,
 } from './types';
 
 function buildLocalCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
   const currentBarTime = Math.floor(nowSec / 60) * 60;
-  const totalBars = 52;
+  const totalBars = 24;
   const candles: Candle[] = [];
   let price = seed.basePrice;
   const step = seed.stepSize;
@@ -35,9 +43,9 @@ function buildLocalCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
 
     if (!isFormingBar && seed.initialPattern === 'UP_FLOW') {
       if (closedIdxFromEnd <= 4) {
-        delta = step * (0.92 + pseudoRand(i) * 0.14);
-        upperWick = step * 0.05;
-        lowerWick = step * 0.04;
+        delta = step * (0.88 + pseudoRand(i) * 0.22);
+        upperWick = step * (0.08 + pseudoRand(i + 1) * 0.08);
+        lowerWick = step * (0.05 + pseudoRand(i + 2) * 0.05);
       } else if (closedIdxFromEnd === 5) {
         delta = -step * 1.05;
       } else {
@@ -45,30 +53,30 @@ function buildLocalCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
       }
     } else if (!isFormingBar && seed.initialPattern === 'DOWN_FLOW') {
       if (closedIdxFromEnd <= 4) {
-        delta = -step * (0.94 + pseudoRand(i) * 0.12);
-        upperWick = step * 0.04;
-        lowerWick = step * 0.05;
+        delta = -step * (0.88 + pseudoRand(i) * 0.22);
+        upperWick = step * (0.05 + pseudoRand(i + 1) * 0.05);
+        lowerWick = step * (0.08 + pseudoRand(i + 2) * 0.08);
       } else if (closedIdxFromEnd === 5) {
         delta = step * 0.98;
       } else {
         delta = (i % 2 === 0 ? -1 : 1) * step * (0.8 + pseudoRand(i) * 0.4);
       }
     } else if (!isFormingBar && seed.initialPattern === 'FORMING_UP') {
-      if (closedIdxFromEnd <= 3) {
-        delta = step * (0.92 + pseudoRand(i) * 0.12);
-        upperWick = step * 0.05;
-        lowerWick = step * 0.04;
-      } else if (closedIdxFromEnd === 4) {
+      if (closedIdxFromEnd <= 2) {
+        delta = step * (0.88 + pseudoRand(i) * 0.2);
+        upperWick = step * (0.08 + pseudoRand(i + 1) * 0.07);
+        lowerWick = step * (0.05 + pseudoRand(i + 2) * 0.05);
+      } else if (closedIdxFromEnd === 3) {
         delta = -step * 1.02;
       } else {
         delta = (i % 2 === 0 ? 1 : -1) * step * (0.85 + pseudoRand(i) * 0.3);
       }
     } else if (!isFormingBar && seed.initialPattern === 'FORMING_DOWN') {
-      if (closedIdxFromEnd <= 3) {
-        delta = -step * (0.92 + pseudoRand(i) * 0.12);
-        upperWick = step * 0.04;
-        lowerWick = step * 0.05;
-      } else if (closedIdxFromEnd === 4) {
+      if (closedIdxFromEnd <= 2) {
+        delta = -step * (0.88 + pseudoRand(i) * 0.2);
+        upperWick = step * (0.05 + pseudoRand(i + 1) * 0.05);
+        lowerWick = step * (0.08 + pseudoRand(i + 2) * 0.07);
+      } else if (closedIdxFromEnd === 3) {
         delta = step * 1.02;
       } else {
         delta = (i % 2 === 0 ? -1 : 1) * step * (0.85 + pseudoRand(i) * 0.3);
@@ -109,9 +117,41 @@ export class LocalDemoScanner {
     { mode: 'CHOP' | 'FLOW_UP' | 'FLOW_DOWN'; remainingBars: number }
   >();
   private alerts: TrendAlert[] = [];
+  private decisionRecords: DecisionRecord[] = [];
+  private aiSamples: PatternFeedbackSample[] = [];
+  private aiModel: AiPatternModel = buildAiPatternModel([]);
   private lastAlertedTime = new Map<string, number>();
+  private lastAlertedAtMs = new Map<string, number>();
 
-  constructor() {
+  private upsertUniqueAlert(alert: TrendAlert) {
+    const key = normalizeAssetHistoryKey(alert.assetName, alert.assetId);
+    this.alerts = this.alerts.filter(
+      (existing) =>
+        normalizeAssetHistoryKey(existing.assetName, existing.assetId) !== key &&
+        existing.id !== alert.id
+    );
+    this.alerts.unshift(alert);
+    if (this.alerts.length > 80) this.alerts.pop();
+  }
+
+  constructor(initialState?: {
+    alerts?: TrendAlert[];
+    decisionRecords?: DecisionRecord[];
+    aiSamples?: PatternFeedbackSample[];
+  }) {
+    if (Array.isArray(initialState?.alerts)) {
+      for (const a of initialState.alerts) {
+        this.upsertUniqueAlert({ ...a });
+      }
+    }
+    if (Array.isArray(initialState?.decisionRecords)) {
+      this.decisionRecords = [...initialState.decisionRecords];
+    }
+    if (Array.isArray(initialState?.aiSamples)) {
+      this.aiSamples = [...initialState.aiSamples];
+      this.aiModel = buildAiPatternModel(this.aiSamples);
+    }
+
     const nowSec = Math.floor(Date.now() / 1000);
     for (const seed of IQ_OPTION_ASSETS) {
       this.candlesByAsset.set(seed.id, buildLocalCandles(seed, nowSec));
@@ -129,9 +169,10 @@ export class LocalDemoScanner {
     const initial = this.getSnapshot(DEFAULT_SCANNER_CONFIG);
     for (const st of initial.assets) {
       if (st.analysis.status === 'MATCH' && st.analysis.direction) {
-        const closedTime = st.candles[st.candles.length - 2].time;
+        const closedTime = st.analysis.signalTime ?? st.candles[st.candles.length - 2].time;
         this.lastAlertedTime.set(st.asset.id, closedTime);
-        this.alerts.unshift({
+        this.lastAlertedAtMs.set(st.asset.id, Date.now());
+        this.upsertUniqueAlert({
           id: `${st.asset.id}-${closedTime}`,
           assetId: st.asset.id,
           assetName: st.asset.name,
@@ -142,10 +183,13 @@ export class LocalDemoScanner {
           runLength: st.analysis.runLength,
           avgWickRatio: st.analysis.avgWickRatio,
           uniformityScore: st.analysis.uniformityScore,
+          matchScore: st.analysis.matchScore,
           priceAtAlert: st.lastPrice,
           candleTime: closedTime,
           createdAt: Date.now() - 3000,
           acknowledged: false,
+          patternFeatures: st.analysis.patternFeatures,
+          aiSimilarityScore: st.analysis.aiSimilarityScore,
         });
       }
     }
@@ -166,25 +210,37 @@ export class LocalDemoScanner {
       if (currentBarStart > lastBar.time) {
         if (regime.mode === 'FLOW_UP') {
           const targetClose = Number(
-            (lastBar.open + seed.stepSize * (0.94 + Math.random() * 0.12)).toFixed(seed.decimals)
+            (lastBar.open + seed.stepSize * (0.86 + Math.random() * 0.28)).toFixed(seed.decimals)
           );
           lastBar.close = targetClose;
           lastBar.high = Number(
-            (Math.max(lastBar.open, targetClose) + seed.stepSize * 0.05).toFixed(seed.decimals)
+            (
+              Math.max(lastBar.open, targetClose) +
+              seed.stepSize * (0.07 + Math.random() * 0.09)
+            ).toFixed(seed.decimals)
           );
           lastBar.low = Number(
-            (Math.min(lastBar.open, targetClose) - seed.stepSize * 0.04).toFixed(seed.decimals)
+            (
+              Math.min(lastBar.open, targetClose) -
+              seed.stepSize * (0.04 + Math.random() * 0.06)
+            ).toFixed(seed.decimals)
           );
         } else if (regime.mode === 'FLOW_DOWN') {
           const targetClose = Number(
-            (lastBar.open - seed.stepSize * (0.94 + Math.random() * 0.12)).toFixed(seed.decimals)
+            (lastBar.open - seed.stepSize * (0.86 + Math.random() * 0.28)).toFixed(seed.decimals)
           );
           lastBar.close = targetClose;
           lastBar.high = Number(
-            (Math.max(lastBar.open, targetClose) + seed.stepSize * 0.04).toFixed(seed.decimals)
+            (
+              Math.max(lastBar.open, targetClose) +
+              seed.stepSize * (0.04 + Math.random() * 0.06)
+            ).toFixed(seed.decimals)
           );
           lastBar.low = Number(
-            (Math.min(lastBar.open, targetClose) - seed.stepSize * 0.05).toFixed(seed.decimals)
+            (
+              Math.min(lastBar.open, targetClose) -
+              seed.stepSize * (0.07 + Math.random() * 0.09)
+            ).toFixed(seed.decimals)
           );
         }
 
@@ -192,19 +248,19 @@ export class LocalDemoScanner {
         if (regime.remainingBars <= 0) {
           if (regime.mode === 'CHOP') {
             const r = Math.random();
-            if (r < 0.28) {
+            if (r < 0.09) {
               regime.mode = 'FLOW_UP';
-              regime.remainingBars = 5 + Math.floor(Math.random() * 2);
-            } else if (r < 0.56) {
+              regime.remainingBars = 4 + Math.floor(Math.random() * 3);
+            } else if (r < 0.18) {
               regime.mode = 'FLOW_DOWN';
-              regime.remainingBars = 5 + Math.floor(Math.random() * 2);
+              regime.remainingBars = 4 + Math.floor(Math.random() * 3);
             } else {
               regime.mode = 'CHOP';
-              regime.remainingBars = 3 + Math.floor(Math.random() * 5);
+              regime.remainingBars = 4 + Math.floor(Math.random() * 5);
             }
           } else {
             regime.mode = 'CHOP';
-            regime.remainingBars = 4 + Math.floor(Math.random() * 5);
+            regime.remainingBars = 5 + Math.floor(Math.random() * 5);
           }
         }
         this.regimes.set(seed.id, regime);
@@ -220,17 +276,24 @@ export class LocalDemoScanner {
         });
         if (list.length > 60) list.shift();
 
-        if (scanningActive && list.length >= 10) {
-          const analysis = analyzeCandleTrend(list, config);
-          const closedTime = list[list.length - 2].time;
+        if (scanningActive && list.length >= 8) {
+          const analysis = analyzeCandleTrend(list, config, {
+            aiModel: this.aiModel,
+            aiSamples: this.aiSamples,
+          });
+          const signalTime = analysis.signalTime ?? list[list.length - 1].time;
+          const prevAlertAt = this.lastAlertedAtMs.get(seed.id) ?? 0;
           if (
             analysis.status === 'MATCH' &&
             analysis.direction &&
-            this.lastAlertedTime.get(seed.id) !== closedTime
+            analysis.matchScore >= (config.minMatchScore ?? 86) &&
+            this.lastAlertedTime.get(seed.id) !== signalTime &&
+            Date.now() - prevAlertAt >= 90 * 1000
           ) {
-            this.lastAlertedTime.set(seed.id, closedTime);
+            this.lastAlertedTime.set(seed.id, signalTime);
+            this.lastAlertedAtMs.set(seed.id, Date.now());
             const alert: TrendAlert = {
-              id: `${seed.id}-${closedTime}`,
+              id: `${seed.id}-${signalTime}`,
               assetId: seed.id,
               assetName: seed.name,
               assetSymbol: seed.symbol,
@@ -240,27 +303,29 @@ export class LocalDemoScanner {
               runLength: analysis.runLength,
               avgWickRatio: analysis.avgWickRatio,
               uniformityScore: analysis.uniformityScore,
+              matchScore: analysis.matchScore,
               priceAtAlert: list[list.length - 1].close,
-              candleTime: closedTime,
+              candleTime: signalTime,
               createdAt: Date.now(),
               acknowledged: false,
+              patternFeatures: analysis.patternFeatures,
+              aiSimilarityScore: analysis.aiSimilarityScore,
             };
-            this.alerts.unshift(alert);
-            if (this.alerts.length > 80) this.alerts.pop();
+            this.upsertUniqueAlert(alert);
             newAlerts.push(alert);
           }
         }
       } else {
-        const progress = Math.min(1, Math.max(0.05, elapsedInBar / 60));
+        const progress = Math.min(1, Math.max(0.14, Math.pow(elapsedInBar / 60, 0.72)));
         let drift = 0;
         let noise = (Math.random() - 0.5) * seed.stepSize * 0.16;
 
         if (regime.mode === 'FLOW_UP') {
           drift = seed.stepSize * 0.98 * progress;
-          noise = (Math.random() - 0.35) * seed.stepSize * 0.05;
+          noise = (Math.random() - 0.35) * seed.stepSize * 0.04;
         } else if (regime.mode === 'FLOW_DOWN') {
           drift = -seed.stepSize * 0.98 * progress;
-          noise = (Math.random() - 0.65) * seed.stepSize * 0.05;
+          noise = (Math.random() - 0.65) * seed.stepSize * 0.04;
         } else {
           drift = lastBar.close - lastBar.open + (Math.random() - 0.5) * seed.stepSize * 0.45;
         }
@@ -275,17 +340,134 @@ export class LocalDemoScanner {
         lastBar.high = Number(Math.max(lastBar.high, nextClose).toFixed(seed.decimals));
         lastBar.low = Number(Math.min(lastBar.low, nextClose).toFixed(seed.decimals));
         lastBar.volume = (lastBar.volume ?? 10) + 1;
+
+        if (scanningActive && config.realtimeAlertImmediate && list.length >= 8) {
+          const analysis = analyzeCandleTrend(list, config, {
+            aiModel: this.aiModel,
+            aiSamples: this.aiSamples,
+          });
+          const signalTime = analysis.signalTime ?? list[list.length - 1].time;
+          const prevAlertAt = this.lastAlertedAtMs.get(seed.id) ?? 0;
+          if (
+            analysis.status === 'MATCH' &&
+            analysis.direction &&
+            analysis.matchScore >= (config.minMatchScore ?? 86) &&
+            this.lastAlertedTime.get(seed.id) !== signalTime &&
+            Date.now() - prevAlertAt >= 90 * 1000
+          ) {
+            this.lastAlertedTime.set(seed.id, signalTime);
+            this.lastAlertedAtMs.set(seed.id, Date.now());
+            const alert: TrendAlert = {
+              id: `${seed.id}-${signalTime}`,
+              assetId: seed.id,
+              assetName: seed.name,
+              assetSymbol: seed.symbol,
+              category: seed.category,
+              payoutPercent: seed.payoutPercent,
+              direction: analysis.direction,
+              runLength: analysis.runLength,
+              avgWickRatio: analysis.avgWickRatio,
+              uniformityScore: analysis.uniformityScore,
+              matchScore: analysis.matchScore,
+              priceAtAlert: list[list.length - 1].close,
+              candleTime: signalTime,
+              createdAt: Date.now(),
+              acknowledged: false,
+              patternFeatures: analysis.patternFeatures,
+              aiSimilarityScore: analysis.aiSimilarityScore,
+            };
+            this.upsertUniqueAlert(alert);
+            newAlerts.push(alert);
+          }
+        }
       }
     }
 
     return newAlerts;
   }
 
-  markDecision(alertId: string, decisionNote: 'WATCHED' | 'TRADED_MANUAL' | 'SKIPPED') {
+  addAiFeedback(sample: PatternFeedbackSample) {
+    const filtered = sample.alertId
+      ? this.aiSamples.filter((s) => s.alertId !== sample.alertId)
+      : this.aiSamples;
+    this.aiSamples = [...filtered, sample].slice(-MAX_AI_TRAINING_SAMPLES);
+    this.aiModel = buildAiPatternModel(this.aiSamples);
+
+    if (sample.alertId) {
+      const target = this.alerts.find((a) => a.id === sample.alertId);
+      if (target) {
+        target.aiVerdict = sample.verdict;
+        if (sample.verdict === 'PASS') {
+          target.acknowledged = true;
+          if (!target.decisionNote) target.decisionNote = 'WATCHED';
+        }
+      }
+    }
+    return {
+      aiSamples: [...this.aiSamples],
+      aiModel: this.aiModel,
+      alerts: [...this.alerts],
+    };
+  }
+
+  replaceAiSamples(samples: PatternFeedbackSample[]) {
+    this.aiSamples = samples.slice(-MAX_AI_TRAINING_SAMPLES);
+    this.aiModel = buildAiPatternModel(this.aiSamples);
+    return {
+      aiSamples: [...this.aiSamples],
+      aiModel: this.aiModel,
+    };
+  }
+
+  removeAiSample(sampleId: string) {
+    this.aiSamples = this.aiSamples.filter((s) => s.id !== sampleId);
+    this.aiModel = buildAiPatternModel(this.aiSamples);
+    return {
+      aiSamples: [...this.aiSamples],
+      aiModel: this.aiModel,
+    };
+  }
+
+  clearAiSamples() {
+    this.aiSamples = [];
+    this.aiModel = buildAiPatternModel([]);
+    return {
+      aiSamples: [],
+      aiModel: this.aiModel,
+    };
+  }
+
+  markDecision(
+    alertId: string,
+    decisionNote: 'WATCHED' | 'TRADED_MANUAL' | 'SKIPPED',
+    tradeOutcome?: TradeOutcome
+  ) {
     const found = this.alerts.find((a) => a.id === alertId);
     if (found) {
-      found.decisionNote = decisionNote;
+      found.decisionNote = tradeOutcome ? 'TRADED_MANUAL' : decisionNote;
+      if (tradeOutcome) found.tradeOutcome = tradeOutcome;
       found.acknowledged = true;
+
+      const existingIdx = this.decisionRecords.findIndex((r) => r.alertId === found.id);
+      const record: DecisionRecord = {
+        id: `dec-${found.id}`,
+        alertId: found.id,
+        assetId: found.assetId,
+        assetName: found.assetName,
+        direction: found.direction,
+        payoutPercent: found.payoutPercent,
+        matchScore: found.matchScore ?? found.uniformityScore,
+        runLength: found.runLength,
+        decisionNote: found.decisionNote,
+        tradeOutcome: found.tradeOutcome,
+        recordedAt: Date.now(),
+      };
+      if (existingIdx >= 0) {
+        this.decisionRecords[existingIdx] = record;
+      } else {
+        this.decisionRecords.push(record);
+        if (this.decisionRecords.length > 200) this.decisionRecords.shift();
+      }
     }
     return found ?? null;
   }
@@ -293,6 +475,9 @@ export class LocalDemoScanner {
   getSnapshot(config: ScannerConfig): {
     assets: ScannedAssetState[];
     alerts: TrendAlert[];
+    decisionRecords: DecisionRecord[];
+    aiSamples: PatternFeedbackSample[];
+    aiModel: AiPatternModel;
   } {
     const nowSec = Math.floor(Date.now() / 1000);
     const currentBarStart = Math.floor(nowSec / 60) * 60;
@@ -300,7 +485,10 @@ export class LocalDemoScanner {
 
     const states: ScannedAssetState[] = IQ_OPTION_ASSETS.map((seed) => {
       const candles = this.candlesByAsset.get(seed.id) ?? [];
-      const analysis = analyzeCandleTrend(candles, config);
+      const analysis = analyzeCandleTrend(candles, config, {
+        aiModel: this.aiModel,
+        aiSamples: this.aiSamples,
+      });
       const lastPrice = candles.length > 0 ? candles[candles.length - 1].close : seed.basePrice;
       return {
         asset: {
@@ -321,18 +509,14 @@ export class LocalDemoScanner {
       };
     });
 
-    const rank = (status: string) =>
-      status === 'MATCH' ? 0 : status === 'FORMING' ? 1 : status === 'OVEREXTENDED' ? 2 : 3;
-
-    states.sort((a, b) => {
-      const r = rank(a.analysis.status) - rank(b.analysis.status);
-      if (r !== 0) return r;
-      return b.analysis.uniformityScore - a.analysis.uniformityScore;
-    });
+    states.sort((a, b) => compareAssetsByFlowRank(a, b));
 
     return {
       assets: states,
       alerts: [...this.alerts],
+      decisionRecords: [...this.decisionRecords],
+      aiSamples: [...this.aiSamples],
+      aiModel: this.aiModel,
     };
   }
 }

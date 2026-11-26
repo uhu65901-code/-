@@ -198,6 +198,10 @@ export class IqLiveFeedConnection {
     }
   }
 
+  private getPreferredAssetId(activeId: number): string {
+    return this.activeIdToAssetId.get(activeId) ?? `iq-${activeId}`;
+  }
+
   getDiscoveredAssets(): AssetInfo[] {
     return Array.from(this.discoveredAssets.values());
   }
@@ -234,37 +238,58 @@ export class IqLiveFeedConnection {
         } else if (msg.name === 'candles' && msg.msg?.candles && msg.request_id) {
           const assetId = this.reqIdToAssetId.get(String(msg.request_id));
           if (assetId && Array.isArray(msg.msg.candles)) {
-            const parsed: Candle[] = msg.msg.candles.map(
-              (c: {
-                from: number;
-                open: number;
-                max: number;
-                min: number;
-                close: number;
-                volume?: number;
-              }) => ({
-                time: Number(c.from),
-                open: Number(c.open),
-                high: Number(c.max),
-                low: Number(c.min),
-                close: Number(c.close),
-                volume: c.volume ? Number(c.volume) : 0,
-              })
-            );
-            this.onCandlesUpdate(assetId, parsed);
+            const parsed: Candle[] = msg.msg.candles
+              .map(
+                (c: {
+                  from: number;
+                  open: number;
+                  max: number;
+                  min: number;
+                  close: number;
+                  volume?: number;
+                }) => ({
+                  time: Number(c.from),
+                  open: Number(c.open),
+                  high: Number(c.max),
+                  low: Number(c.min),
+                  close: Number(c.close),
+                  volume: c.volume ? Number(c.volume) : 0,
+                })
+              )
+              .filter(
+                (c: Candle) =>
+                  Number.isFinite(c.time) &&
+                  Number.isFinite(c.open) &&
+                  Number.isFinite(c.high) &&
+                  Number.isFinite(c.low) &&
+                  Number.isFinite(c.close)
+              )
+              .sort((a: Candle, b: Candle) => a.time - b.time);
+            if (parsed.length > 0) {
+              this.onCandlesUpdate(assetId, parsed);
+            }
           }
         } else if (msg.name === 'candle-generated' && msg.msg) {
           const c = msg.msg;
           const assetId = this.activeIdToAssetId.get(Number(c.active_id));
           if (assetId && Number(c.size) === 60) {
-            this.onCandleTick(assetId, {
+            const parsedTick: Candle = {
               time: Number(c.from),
               open: Number(c.open),
               high: Number(c.max),
               low: Number(c.min),
               close: Number(c.close),
               volume: c.volume ? Number(c.volume) : 0,
-            });
+            };
+            if (
+              Number.isFinite(parsedTick.time) &&
+              Number.isFinite(parsedTick.open) &&
+              Number.isFinite(parsedTick.high) &&
+              Number.isFinite(parsedTick.low) &&
+              Number.isFinite(parsedTick.close)
+            ) {
+              this.onCandleTick(assetId, parsedTick);
+            }
           }
         }
       } catch {
@@ -343,12 +368,18 @@ export class IqLiveFeedConnection {
         const rawName = String(active.name || active.ticker || `ACTIVE-${activeId}`);
         const cleanName = cleanBrokerAssetName(rawName);
         const ticker = String(active.ticker || cleanName);
-        const precision = Math.min(8, Math.max(2, Number(active.precision ?? 5)));
-        const commission = Number((active.option as { profit?: { commission?: number } } | undefined)?.profit?.commission ?? 16);
-        const payoutPercent = Math.max(50, Math.min(98, 100 - commission));
+        const rawPrec = Number(active.precision);
+        const precision = Number.isFinite(rawPrec)
+          ? Math.min(8, Math.max(2, Math.round(rawPrec)))
+          : 5;
+        const rawCommission = Number(
+          (active.option as { profit?: { commission?: number } } | undefined)?.profit?.commission
+        );
+        const commission = Number.isFinite(rawCommission) ? rawCommission : 16;
+        const payoutPercent = Math.max(50, Math.min(98, Math.round(100 - commission)));
         const isOtc = /otc/i.test(cleanName) || /otc/i.test(ticker);
 
-        const assetId = `iq-${activeId}`;
+        const assetId = this.getPreferredAssetId(activeId);
         const info: AssetInfo = {
           id: assetId,
           iqActiveId: activeId,
@@ -388,7 +419,7 @@ export class IqLiveFeedConnection {
       const schedule = Array.isArray(item.schedule) ? item.schedule : [];
       const cleanName = cleanBrokerAssetName(String(item.name || item.underlying || `DIG-${activeId}`));
       const isOtc = /otc/i.test(cleanName);
-      const assetId = `iq-${activeId}`;
+      const assetId = this.getPreferredAssetId(activeId);
 
       if (!this.discoveredAssets.has(assetId)) {
         const info: AssetInfo = {
@@ -417,6 +448,45 @@ export class IqLiveFeedConnection {
     }
   }
 
+  requestAssetCandles(assetId: string) {
+    const info =
+      this.discoveredAssets.get(assetId) ??
+      IQ_OPTION_ASSETS.find((a) => a.id === assetId);
+    if (!info || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const reqId = `candles_${this.reqCounter++}`;
+    this.reqIdToAssetId.set(reqId, info.id);
+    this.activeIdToAssetId.set(info.iqActiveId, info.id);
+
+    this.send({
+      name: 'sendMessage',
+      request_id: reqId,
+      msg: {
+        name: 'get-candles',
+        version: '2.0',
+        body: {
+          active_id: info.iqActiveId,
+          size: 60,
+          to: nowSec,
+          count: 25,
+        },
+      },
+    });
+    this.send({
+      name: 'subscribeMessage',
+      msg: {
+        name: 'candle-generated',
+        params: {
+          routingFilters: {
+            active_id: info.iqActiveId,
+            size: 60,
+          },
+        },
+      },
+    });
+  }
+
   private subscribeBatch(assets: AssetInfo[]) {
     const nowSec = Math.floor(Date.now() / 1000);
     assets.forEach((asset, idx) => {
@@ -441,7 +511,7 @@ export class IqLiveFeedConnection {
               active_id: asset.iqActiveId,
               size: 60,
               to: nowSec,
-              count: 55,
+              count: 25,
             },
           },
         });

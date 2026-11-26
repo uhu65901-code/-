@@ -1,12 +1,20 @@
 import crypto from 'crypto';
+import { buildAiPatternModel } from '../lib/aiPatternLearner.ts';
+import { compareAssetsByFlowRank } from '../lib/assetRanking.ts';
 import { analyzeCandleTrend } from '../lib/trendDetector.ts';
+import { normalizeAssetHistoryKey } from '../lib/performanceStats.ts';
 import {
   DEFAULT_SCANNER_CONFIG,
+  MAX_AI_TRAINING_SAMPLES,
+  type AiPatternModel,
   type AssetInfo,
   type Candle,
   type ConnectionMode,
+  type DecisionRecord,
+  type PatternFeedbackSample,
   type ScannerConfig,
   type ScannedAssetState,
+  type TradeOutcome,
   type TrendAlert,
 } from '../lib/types.ts';
 import { IQ_OPTION_ASSETS, type CatalogSeedAsset } from './assetsCatalog.ts';
@@ -35,7 +43,7 @@ type EngineListener = (event: {
  */
 function buildInitialCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
   const currentBarTime = Math.floor(nowSec / 60) * 60;
-  const totalBars = 52;
+  const totalBars = 24;
   const candles: Candle[] = [];
   let price = seed.basePrice;
   const step = seed.stepSize;
@@ -60,10 +68,10 @@ function buildInitialCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
 
     if (!isFormingBar && seed.initialPattern === 'UP_FLOW') {
       if (closedIdxFromEnd <= 4) {
-        // 5 clean short green candles with minimal wicks (matching 5-6 candle rule)
-        delta = step * (0.92 + pseudoRand(i) * 0.14);
-        upperWick = step * 0.05;
-        lowerWick = step * 0.04;
+        // 5 clean same-color green candles with small natural wicks
+        delta = step * (0.88 + pseudoRand(i) * 0.22);
+        upperWick = step * (0.08 + pseudoRand(i + 1) * 0.08);
+        lowerWick = step * (0.05 + pseudoRand(i + 2) * 0.05);
       } else if (closedIdxFromEnd === 5) {
         delta = -step * 1.05;
       } else {
@@ -71,33 +79,33 @@ function buildInitialCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
       }
     } else if (!isFormingBar && seed.initialPattern === 'DOWN_FLOW') {
       if (closedIdxFromEnd <= 4) {
-        // 5 clean short red candles with minimal wicks
-        delta = -step * (0.94 + pseudoRand(i) * 0.12);
-        upperWick = step * 0.04;
-        lowerWick = step * 0.05;
+        // 5 clean same-color red candles with small natural wicks
+        delta = -step * (0.88 + pseudoRand(i) * 0.22);
+        upperWick = step * (0.05 + pseudoRand(i + 1) * 0.05);
+        lowerWick = step * (0.08 + pseudoRand(i + 2) * 0.08);
       } else if (closedIdxFromEnd === 5) {
         delta = step * 0.98;
       } else {
         delta = (i % 2 === 0 ? -1 : 1) * step * (0.8 + pseudoRand(i) * 0.4);
       }
     } else if (!isFormingBar && seed.initialPattern === 'FORMING_UP') {
-      if (closedIdxFromEnd <= 3) {
-        // 4 clean short green candles (forming 4/5)
-        delta = step * (0.92 + pseudoRand(i) * 0.12);
-        upperWick = step * 0.05;
-        lowerWick = step * 0.04;
-      } else if (closedIdxFromEnd === 4) {
+      if (closedIdxFromEnd <= 2) {
+        // 3 clean same-color green candles forming toward 4th
+        delta = step * (0.88 + pseudoRand(i) * 0.2);
+        upperWick = step * (0.08 + pseudoRand(i + 1) * 0.07);
+        lowerWick = step * (0.05 + pseudoRand(i + 2) * 0.05);
+      } else if (closedIdxFromEnd === 3) {
         delta = -step * 1.02;
       } else {
         delta = (i % 2 === 0 ? 1 : -1) * step * (0.85 + pseudoRand(i) * 0.3);
       }
     } else if (!isFormingBar && seed.initialPattern === 'FORMING_DOWN') {
-      if (closedIdxFromEnd <= 3) {
-        // 4 clean short red candles (forming 4/5)
-        delta = -step * (0.92 + pseudoRand(i) * 0.12);
-        upperWick = step * 0.04;
-        lowerWick = step * 0.05;
-      } else if (closedIdxFromEnd === 4) {
+      if (closedIdxFromEnd <= 2) {
+        // 3 clean same-color red candles forming toward 4th
+        delta = -step * (0.88 + pseudoRand(i) * 0.2);
+        upperWick = step * (0.05 + pseudoRand(i + 1) * 0.05);
+        lowerWick = step * (0.08 + pseudoRand(i + 2) * 0.07);
+      } else if (closedIdxFromEnd === 3) {
         delta = step * 1.02;
       } else {
         delta = (i % 2 === 0 ? -1 : 1) * step * (0.85 + pseudoRand(i) * 0.3);
@@ -141,7 +149,11 @@ export class MarketScannerEngine {
   private demoCandles = new Map<string, Candle[]>();
   private demoRegimes = new Map<string, DemoRegime>();
   private demoAlerts: TrendAlert[] = [];
+  private decisionRecords: DecisionRecord[] = [];
+  private aiSamples: PatternFeedbackSample[] = [];
+  private aiModel: AiPatternModel = buildAiPatternModel([]);
   private lastAlertedCandleTime = new Map<string, number>();
+  private lastAlertedAtMs = new Map<string, number>();
   private listeners = new Set<EngineListener>();
   private tickTimer: NodeJS.Timeout | null = null;
   private liveAssetCandles = new Map<string, Map<string, Candle[]>>();
@@ -159,19 +171,17 @@ export class MarketScannerEngine {
             : seed.initialPattern === 'FORMING_DOWN' || seed.initialPattern === 'DOWN_FLOW'
               ? 'FLOW_DOWN'
               : 'CHOP',
-        remainingBars:
-          seed.initialPattern === 'FORMING_UP' || seed.initialPattern === 'FORMING_DOWN'
-            ? 2
-            : 2,
+        remainingBars: 2,
       });
     }
 
     const initialStates = this.getScannedStates(DEFAULT_SCANNER_CONFIG);
     for (const st of initialStates) {
       if (st.analysis.status === 'MATCH' && st.analysis.direction) {
-        const closedTime = st.candles[st.candles.length - 2].time;
+        const closedTime = st.analysis.signalTime ?? st.candles[st.candles.length - 2].time;
         this.lastAlertedCandleTime.set(st.asset.id, closedTime);
-        this.demoAlerts.unshift({
+        this.lastAlertedAtMs.set(st.asset.id, Date.now());
+        this.upsertUniqueAlert({
           id: `${st.asset.id}-${closedTime}`,
           assetId: st.asset.id,
           assetName: st.asset.name,
@@ -182,10 +192,13 @@ export class MarketScannerEngine {
           runLength: st.analysis.runLength,
           avgWickRatio: st.analysis.avgWickRatio,
           uniformityScore: st.analysis.uniformityScore,
+          matchScore: st.analysis.matchScore,
           priceAtAlert: st.lastPrice,
           candleTime: closedTime,
           createdAt: Date.now() - 4000,
           acknowledged: false,
+          patternFeatures: st.analysis.patternFeatures,
+          aiSimilarityScore: st.analysis.aiSimilarityScore,
         });
       }
     }
@@ -253,6 +266,9 @@ export class MarketScannerEngine {
           const last = list[list.length - 1];
           if (last.time === tickCandle.time) {
             list[list.length - 1] = tickCandle;
+            if (session.scanningActive && session.config.realtimeAlertImmediate) {
+              this.checkNewSignalForAsset(assetId, list, session.config, session);
+            }
           } else if (tickCandle.time > last.time) {
             list.push(tickCandle);
             if (list.length > 65) list.shift();
@@ -303,6 +319,13 @@ export class MarketScannerEngine {
     return session.config;
   }
 
+  requestAssetCandles(token: string, assetId: string) {
+    const session = this.sessions.get(token);
+    if (session?.iqFeed) {
+      session.iqFeed.requestAssetCandles(assetId);
+    }
+  }
+
   getScannedStates(config: ScannerConfig, sessionToken?: string): ScannedAssetState[] {
     const nowSec = Math.floor(Date.now() / 1000);
     const currentBarStart = Math.floor(nowSec / 60) * 60;
@@ -327,12 +350,16 @@ export class MarketScannerEngine {
           }));
 
     const states: ScannedAssetState[] = catalogList.map((assetInfo) => {
+      const liveCandles = liveMap?.get(assetInfo.id);
       const candles =
-        liveMap && liveMap.get(assetInfo.id) && (liveMap.get(assetInfo.id)?.length ?? 0) >= 8
-          ? liveMap.get(assetInfo.id)!
+        liveCandles && liveCandles.length >= 2
+          ? liveCandles
           : (this.demoCandles.get(assetInfo.id) ?? []);
 
-      const analysis = analyzeCandleTrend(candles, config);
+      const analysis = analyzeCandleTrend(candles, config, {
+        aiModel: this.aiModel,
+        aiSamples: this.aiSamples,
+      });
       const lastPrice =
         candles.length > 0 ? candles[candles.length - 1].close : (assetInfo.basePrice ?? 0);
 
@@ -355,23 +382,125 @@ export class MarketScannerEngine {
       };
     });
 
-    const rank = (status: string) =>
-      status === 'MATCH' ? 0 : status === 'FORMING' ? 1 : status === 'OVEREXTENDED' ? 2 : 3;
+    return states.sort((a, b) => compareAssetsByFlowRank(a, b));
+  }
 
-    return states.sort((a, b) => {
-      const r = rank(a.analysis.status) - rank(b.analysis.status);
-      if (r !== 0) return r;
-      return b.analysis.uniformityScore - a.analysis.uniformityScore;
-    });
+  private upsertUniqueAlert(alert: TrendAlert) {
+    const targetKey = normalizeAssetHistoryKey(alert.assetName, alert.assetId);
+    this.demoAlerts = this.demoAlerts.filter(
+      (existing) =>
+        normalizeAssetHistoryKey(existing.assetName, existing.assetId) !== targetKey &&
+        existing.id !== alert.id
+    );
+    this.demoAlerts.unshift(alert);
+    if (this.demoAlerts.length > 80) {
+      this.demoAlerts.pop();
+    }
   }
 
   getAlerts(): TrendAlert[] {
     return this.demoAlerts.slice(0, 80);
   }
 
+  getDecisionRecords(): DecisionRecord[] {
+    return this.decisionRecords.slice(-200);
+  }
+
+  getAiSamples(): PatternFeedbackSample[] {
+    return this.aiSamples.slice(-MAX_AI_TRAINING_SAMPLES);
+  }
+
+  getAiModel(): AiPatternModel {
+    return this.aiModel;
+  }
+
+  syncAiSamples(samples: PatternFeedbackSample[]): {
+    aiSamples: PatternFeedbackSample[];
+    aiModel: AiPatternModel;
+  } {
+    const map = new Map<string, PatternFeedbackSample>();
+    for (const item of [...samples, ...this.aiSamples]) {
+      if (
+        item &&
+        typeof item.id === 'string' &&
+        (item.direction === 'UP' || item.direction === 'DOWN') &&
+        (item.verdict === 'PASS' || item.verdict === 'REJECT') &&
+        item.features &&
+        item.features.directionalEfficiency >= 0.58
+      ) {
+        map.set(item.id, item);
+      }
+    }
+    this.aiSamples = Array.from(map.values())
+      .sort((a, b) => a.createdAt - b.createdAt)
+      .slice(-MAX_AI_TRAINING_SAMPLES);
+    this.aiModel = buildAiPatternModel(this.aiSamples);
+    return {
+      aiSamples: this.getAiSamples(),
+      aiModel: this.aiModel,
+    };
+  }
+
+  addAiFeedbackSample(sample: PatternFeedbackSample): {
+    aiSamples: PatternFeedbackSample[];
+    aiModel: AiPatternModel;
+    alerts: TrendAlert[];
+  } {
+    const filtered = sample.alertId
+      ? this.aiSamples.filter((s) => s.alertId !== sample.alertId)
+      : this.aiSamples;
+    this.aiSamples = [...filtered, sample].slice(-MAX_AI_TRAINING_SAMPLES);
+    this.aiModel = buildAiPatternModel(this.aiSamples);
+
+    if (sample.alertId) {
+      const targetAlert = this.demoAlerts.find((a) => a.id === sample.alertId);
+      if (targetAlert) {
+        targetAlert.aiVerdict = sample.verdict;
+        if (sample.verdict === 'PASS') {
+          targetAlert.acknowledged = true;
+          if (!targetAlert.decisionNote) targetAlert.decisionNote = 'WATCHED';
+        }
+      }
+    }
+
+    return {
+      aiSamples: this.getAiSamples(),
+      aiModel: this.aiModel,
+      alerts: this.getAlerts(),
+    };
+  }
+
+  removeAiSample(sampleId: string): {
+    aiSamples: PatternFeedbackSample[];
+    aiModel: AiPatternModel;
+  } {
+    this.aiSamples = this.aiSamples.filter((s) => s.id !== sampleId);
+    this.aiModel = buildAiPatternModel(this.aiSamples);
+    return {
+      aiSamples: this.getAiSamples(),
+      aiModel: this.aiModel,
+    };
+  }
+
+  clearAiSamples(): {
+    aiSamples: PatternFeedbackSample[];
+    aiModel: AiPatternModel;
+  } {
+    this.aiSamples = [];
+    this.aiModel = buildAiPatternModel([]);
+    return {
+      aiSamples: [],
+      aiModel: this.aiModel,
+    };
+  }
+
   updateAlertDecision(
     alertId: string,
-    patch: { acknowledged?: boolean; decisionNote?: TrendAlert['decisionNote'] }
+    patch: {
+      acknowledged?: boolean;
+      decisionNote?: TrendAlert['decisionNote'];
+      tradeOutcome?: TradeOutcome;
+    }
   ): TrendAlert | null {
     const found = this.demoAlerts.find((a) => a.id === alertId);
     if (!found) return null;
@@ -382,6 +511,34 @@ export class MarketScannerEngine {
       found.decisionNote = patch.decisionNote;
       found.acknowledged = true;
     }
+    if (patch.tradeOutcome) {
+      found.tradeOutcome = patch.tradeOutcome;
+      found.decisionNote = 'TRADED_MANUAL';
+      found.acknowledged = true;
+    }
+
+    if (patch.decisionNote || patch.tradeOutcome) {
+      const existingIdx = this.decisionRecords.findIndex((r) => r.alertId === found.id);
+      const record: DecisionRecord = {
+        id: `dec-${found.id}`,
+        alertId: found.id,
+        assetId: found.assetId,
+        assetName: found.assetName,
+        direction: found.direction,
+        payoutPercent: found.payoutPercent,
+        matchScore: found.matchScore ?? found.uniformityScore,
+        runLength: found.runLength,
+        decisionNote: found.decisionNote ?? 'WATCHED',
+        tradeOutcome: found.tradeOutcome,
+        recordedAt: Date.now(),
+      };
+      if (existingIdx >= 0) {
+        this.decisionRecords[existingIdx] = record;
+      } else {
+        this.decisionRecords.push(record);
+        if (this.decisionRecords.length > 200) this.decisionRecords.shift();
+      }
+    }
     return found;
   }
 
@@ -391,15 +548,27 @@ export class MarketScannerEngine {
     config: ScannerConfig,
     session?: UserSession
   ) {
-    if (candles.length < 10) return;
-    const analysis = analyzeCandleTrend(candles, config);
-    if (analysis.status !== 'MATCH' || !analysis.direction) return;
+    if (candles.length < 8) return;
+    const analysis = analyzeCandleTrend(candles, config, {
+      aiModel: this.aiModel,
+      aiSamples: this.aiSamples,
+    });
+    if (
+      analysis.status !== 'MATCH' ||
+      !analysis.direction ||
+      analysis.matchScore < (config.minMatchScore ?? 86)
+    ) {
+      return;
+    }
 
-    const closedTime = candles[candles.length - 2].time;
+    const signalTime = analysis.signalTime ?? candles[candles.length - 1].time;
     const prevTime = this.lastAlertedCandleTime.get(assetId);
-    if (prevTime === closedTime) return;
+    const prevAlertAt = this.lastAlertedAtMs.get(assetId) ?? 0;
+    const nowMs = Date.now();
+    if (prevTime === signalTime || nowMs - prevAlertAt < 90 * 1000) return;
 
-    this.lastAlertedCandleTime.set(assetId, closedTime);
+    this.lastAlertedCandleTime.set(assetId, signalTime);
+    this.lastAlertedAtMs.set(assetId, nowMs);
     const liveAsset = session
       ? this.liveAssetsCatalog.get(session.token)?.find((a) => a.id === assetId)
       : undefined;
@@ -407,7 +576,7 @@ export class MarketScannerEngine {
     if (!seed) return;
 
     const alert: TrendAlert = {
-      id: `${assetId}-${closedTime}`,
+      id: `${assetId}-${signalTime}`,
       assetId,
       assetName: seed.name,
       assetSymbol: seed.symbol,
@@ -417,17 +586,16 @@ export class MarketScannerEngine {
       runLength: analysis.runLength,
       avgWickRatio: analysis.avgWickRatio,
       uniformityScore: analysis.uniformityScore,
+      matchScore: analysis.matchScore,
       priceAtAlert: candles[candles.length - 1].close,
-      candleTime: closedTime,
+      candleTime: signalTime,
       createdAt: Date.now(),
       acknowledged: false,
+      patternFeatures: analysis.patternFeatures,
+      aiSimilarityScore: analysis.aiSimilarityScore,
     };
 
-    this.demoAlerts.unshift(alert);
-    if (this.demoAlerts.length > 80) {
-      this.demoAlerts.pop();
-    }
-
+    this.upsertUniqueAlert(alert);
     this.emit('signal:detected', alert);
   }
 
@@ -450,37 +618,41 @@ export class MarketScannerEngine {
         if (currentBarStart > lastBar.time) {
           if (regime.mode === 'FLOW_UP') {
             const targetClose = Number(
-              (lastBar.open + seed.stepSize * (0.94 + Math.random() * 0.12)).toFixed(
+              (lastBar.open + seed.stepSize * (0.86 + Math.random() * 0.28)).toFixed(
                 seed.decimals
               )
             );
             lastBar.close = targetClose;
             lastBar.high = Number(
-              (Math.max(lastBar.open, targetClose) + seed.stepSize * 0.05).toFixed(
-                seed.decimals
-              )
+              (
+                Math.max(lastBar.open, targetClose) +
+                seed.stepSize * (0.07 + Math.random() * 0.09)
+              ).toFixed(seed.decimals)
             );
             lastBar.low = Number(
-              (Math.min(lastBar.open, targetClose) - seed.stepSize * 0.04).toFixed(
-                seed.decimals
-              )
+              (
+                Math.min(lastBar.open, targetClose) -
+                seed.stepSize * (0.04 + Math.random() * 0.06)
+              ).toFixed(seed.decimals)
             );
           } else if (regime.mode === 'FLOW_DOWN') {
             const targetClose = Number(
-              (lastBar.open - seed.stepSize * (0.94 + Math.random() * 0.12)).toFixed(
+              (lastBar.open - seed.stepSize * (0.86 + Math.random() * 0.28)).toFixed(
                 seed.decimals
               )
             );
             lastBar.close = targetClose;
             lastBar.high = Number(
-              (Math.max(lastBar.open, targetClose) + seed.stepSize * 0.04).toFixed(
-                seed.decimals
-              )
+              (
+                Math.max(lastBar.open, targetClose) +
+                seed.stepSize * (0.04 + Math.random() * 0.06)
+              ).toFixed(seed.decimals)
             );
             lastBar.low = Number(
-              (Math.min(lastBar.open, targetClose) - seed.stepSize * 0.05).toFixed(
-                seed.decimals
-              )
+              (
+                Math.min(lastBar.open, targetClose) -
+                seed.stepSize * (0.07 + Math.random() * 0.09)
+              ).toFixed(seed.decimals)
             );
           }
 
@@ -488,19 +660,19 @@ export class MarketScannerEngine {
           if (regime.remainingBars <= 0) {
             if (regime.mode === 'CHOP') {
               const r = Math.random();
-              if (r < 0.28) {
+              if (r < 0.09) {
                 regime.mode = 'FLOW_UP';
-                regime.remainingBars = 5 + Math.floor(Math.random() * 2); // 5-6 bars
-              } else if (r < 0.56) {
+                regime.remainingBars = 4 + Math.floor(Math.random() * 3); // 4-6 bars
+              } else if (r < 0.18) {
                 regime.mode = 'FLOW_DOWN';
-                regime.remainingBars = 5 + Math.floor(Math.random() * 2); // 5-6 bars
+                regime.remainingBars = 4 + Math.floor(Math.random() * 3); // 4-6 bars
               } else {
                 regime.mode = 'CHOP';
-                regime.remainingBars = 3 + Math.floor(Math.random() * 5);
+                regime.remainingBars = 4 + Math.floor(Math.random() * 5);
               }
             } else {
               regime.mode = 'CHOP';
-              regime.remainingBars = 4 + Math.floor(Math.random() * 5);
+              regime.remainingBars = 5 + Math.floor(Math.random() * 5);
             }
           }
           this.demoRegimes.set(seed.id, regime);
@@ -514,7 +686,7 @@ export class MarketScannerEngine {
             close: newOpen,
             volume: 10,
           });
-          if (list.length > 60) {
+          if (list.length > 26) {
             list.shift();
           }
 
@@ -524,16 +696,16 @@ export class MarketScannerEngine {
             this.checkNewSignalForAsset(seed.id, list, activeConfig, activeSession);
           }
         } else {
-          const progress = Math.min(1, Math.max(0.05, elapsedInBar / 60));
+          const progress = Math.min(1, Math.max(0.14, Math.pow(elapsedInBar / 60, 0.72)));
           let drift = 0;
           let noise = (Math.random() - 0.5) * seed.stepSize * 0.16;
 
           if (regime.mode === 'FLOW_UP') {
             drift = seed.stepSize * 0.98 * progress;
-            noise = (Math.random() - 0.35) * seed.stepSize * 0.05;
+            noise = (Math.random() - 0.35) * seed.stepSize * 0.04;
           } else if (regime.mode === 'FLOW_DOWN') {
             drift = -seed.stepSize * 0.98 * progress;
-            noise = (Math.random() - 0.65) * seed.stepSize * 0.05;
+            noise = (Math.random() - 0.65) * seed.stepSize * 0.04;
           } else {
             drift = (lastBar.close - lastBar.open) + (Math.random() - 0.5) * seed.stepSize * 0.45;
           }
@@ -548,6 +720,15 @@ export class MarketScannerEngine {
           lastBar.high = Number(Math.max(lastBar.high, nextClose).toFixed(seed.decimals));
           lastBar.low = Number(Math.min(lastBar.low, nextClose).toFixed(seed.decimals));
           lastBar.volume = (lastBar.volume ?? 10) + 1;
+
+          const activeSession = Array.from(this.sessions.values()).pop();
+          const activeConfig = activeSession?.config ?? DEFAULT_SCANNER_CONFIG;
+          if (
+            activeConfig.realtimeAlertImmediate &&
+            (!activeSession || activeSession.scanningActive)
+          ) {
+            this.checkNewSignalForAsset(seed.id, list, activeConfig, activeSession);
+          }
         }
       }
 

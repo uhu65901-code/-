@@ -6,11 +6,15 @@ import {
   KeyRound,
   Mail,
   Play,
-  RefreshCw,
   ShieldCheck,
   Smartphone,
 } from 'lucide-react';
-import { ConnectionMode, DEFAULT_SCANNER_CONFIG, ScannerConfig } from '../lib/types';
+import {
+  loadSavedConfig,
+  loadSavedSsid,
+  saveSsidLocally,
+} from '../lib/standaloneStorage';
+import { ConnectionMode, ScannerConfig } from '../lib/types';
 import { checkServerHealth, postJsonWithRetry, ServerHealthStatus } from '../utils/apiClient';
 import { unlockAudioContext } from '../utils/soundAlert';
 import { DownloadInstallModal } from './DownloadInstallModal';
@@ -24,6 +28,7 @@ export interface AuthSuccessPayload {
   iqStatusMessage?: string;
   scanningActive: boolean;
   config: ScannerConfig;
+  ssid?: string;
 }
 
 interface LoginScreenProps {
@@ -34,7 +39,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
   const [authTab, setAuthTab] = useState<'credentials' | 'ssid'>('credentials');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [ssid, setSsid] = useState('');
+  const [ssid, setSsid] = useState(() => loadSavedSsid());
+  const [rememberSsid, setRememberSsid] = useState(() => Boolean(loadSavedSsid()));
   const [showPassword, setShowPassword] = useState(false);
 
   const [requires2FA, setRequires2FA] = useState(false);
@@ -43,15 +49,23 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [connectionIssue, setConnectionIssue] = useState(false);
+  const [standalonePrompt, setStandalonePrompt] = useState(false);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
   const [serverStatus, setServerStatus] = useState<ServerHealthStatus>('checking');
 
+  const isFileOrPortable =
+    typeof window !== 'undefined' &&
+    (window.location.protocol === 'file:' || window.location.protocol === 'content:');
+
   const probeServer = useCallback(async () => {
+    if (isFileOrPortable) {
+      setServerStatus('unreachable');
+      return;
+    }
     setServerStatus('checking');
     const st = await checkServerHealth();
     setServerStatus(st);
-  }, []);
+  }, [isFileOrPortable]);
 
   useEffect(() => {
     probeServer();
@@ -60,19 +74,40 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
   const startLocalDemoFallback = useCallback(() => {
     onAuthenticated({
       token: `local-demo-${Date.now()}`,
-      email: email.trim() || 'offline@flowtrend.local',
+      email: email.trim() || 'standalone@flowtrend.local',
       mode: 'LOCAL_DEMO_STREAM',
       iqConnected: false,
-      iqStatusMessage: 'โหมดสแกนทดสอบสดในเครื่อง (ไม่ง้อเซิร์ฟเวอร์)',
+      iqStatusMessage: 'โหมดสแกนทำงานอิสระในเครื่อง (ไม่ต้องพึ่งเซิร์ฟเวอร์)',
       scanningActive: true,
-      config: { ...DEFAULT_SCANNER_CONFIG },
+      config: loadSavedConfig(),
     });
   }, [email, onAuthenticated]);
+
+  const startBrowserSsidDirect = useCallback(
+    (cleanSsid: string) => {
+      if (rememberSsid) {
+        saveSsidLocally(cleanSsid);
+      } else {
+        saveSsidLocally('');
+      }
+      onAuthenticated({
+        token: `browser-iq-${Date.now()}`,
+        email: email.trim() || 'iq-direct-session',
+        mode: 'IQ_BROWSER_LIVE',
+        iqConnected: true,
+        iqStatusMessage: 'กำลังเชื่อม IQ Option โดยตรงจากในเครื่อง...',
+        scanningActive: true,
+        config: loadSavedConfig(),
+        ssid: cleanSsid,
+      });
+    },
+    [email, onAuthenticated, rememberSsid]
+  );
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setConnectionIssue(false);
+    setStandalonePrompt(false);
     unlockAudioContext();
 
     if (requires2FA) {
@@ -94,7 +129,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
       }
 
       if (res.kind !== 'http_error') {
-        setConnectionIssue(true);
+        setStandalonePrompt(true);
         probeServer();
       }
       setError(res.message);
@@ -117,6 +152,26 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
       }
     }
 
+    // In portable / standalone mode without backend server, SSID connects directly via browser WebSocket
+    if (authTab === 'ssid' && (isFileOrPortable || serverStatus !== 'ready')) {
+      if (rememberSsid) {
+        saveSsidLocally(ssid.trim());
+      } else {
+        saveSsidLocally('');
+      }
+      startBrowserSsidDirect(ssid.trim());
+      return;
+    }
+
+    // If credentials mode and already known to be offline/serverless, immediately guide user without failing with 404
+    if (authTab === 'credentials' && (isFileOrPortable || (serverStatus !== 'ready' && serverStatus !== 'checking'))) {
+      setStandalonePrompt(true);
+      setError(
+        'โหมดอิสระในเครื่อง (ไม่พึ่ง AI Studio) ไม่สามารถส่ง Gmail/รหัสผ่านตรงผ่านเบราว์เซอร์ได้ — กรุณาใช้แท็บ Session SSID เพื่อเชื่อม IQ Option สด หรือเปิดผ่านตัวติดตั้ง PC'
+      );
+      return;
+    }
+
     setLoading(true);
     const payload =
       authTab === 'credentials'
@@ -125,7 +180,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
 
     const res = await postJsonWithRetry<
       AuthSuccessPayload & { requires2FA?: boolean; twoFactorToken?: string }
-    >('/api/auth/login', payload, 3);
+    >('/api/auth/login', payload, 2);
     setLoading(false);
 
     if (res.ok) {
@@ -134,21 +189,38 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
         setTwoFactorToken(res.data.twoFactorToken);
         return;
       }
+      if (authTab === 'ssid') {
+        saveSsidLocally(rememberSsid ? ssid.trim() : '');
+      }
       onAuthenticated(res.data);
       return;
     }
 
     if (res.kind !== 'http_error') {
-      setConnectionIssue(true);
+      if (authTab === 'ssid') {
+        startBrowserSsidDirect(ssid.trim());
+        return;
+      }
+      setStandalonePrompt(true);
       probeServer();
+      setError(
+        'ขณะนี้กำลังเปิดใช้งานแบบไม่พึ่งเซิร์ฟเวอร์ AI Studio — สามารถสลับใช้แท็บ Session SSID เพื่อเชื่อม IQ Option โดยตรง, ใช้โหมด Demo ในเครื่อง, หรือโหลดตัวติดตั้ง PC ได้ทันที'
+      );
+      return;
     }
     setError(res.message);
   };
 
   const handleStartDemo = async () => {
     setError(null);
-    setConnectionIssue(false);
+    setStandalonePrompt(false);
     unlockAudioContext();
+
+    if (isFileOrPortable || serverStatus !== 'ready') {
+      startLocalDemoFallback();
+      return;
+    }
+
     setLoading(true);
     const res = await postJsonWithRetry<AuthSuccessPayload>(
       '/api/auth/login',
@@ -156,7 +228,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
         mode: 'DEMO',
         email: email.trim() || undefined,
       },
-      2
+      1
     );
     setLoading(false);
 
@@ -165,13 +237,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
       return;
     }
 
-    // Seamless fallback: if backend is unreachable/offline (e.g., standalone offline PWA), run local demo engine
-    if (res.kind !== 'http_error') {
-      startLocalDemoFallback();
-      return;
-    }
-
-    setError(res.message);
+    startLocalDemoFallback();
   };
 
   return (
@@ -186,7 +252,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
               </h1>
               <p className="mt-3 text-sm leading-relaxed text-[#94A3B8]">
                 สแกนคู่สินทรัพย์ Binary และ Digital บน IQ Option พร้อมกันทั้งหมด (ทั้งตลาด OTC และตลาดปกติ)
-                เพื่อตรวจจับเทรนด์ไหลต่อเนื่อง 5–6 แท่ง แท่งสั้นสม่ำเสมอ ไส้น้อยมาก และแจ้งเตือนเสียงดังชัดเจน
+                เพื่อตรวจจับเทรนด์ไหลต่อเนื่อง 4–6 แท่งล่าสุด แท่งเล็กสม่ำเสมอ สีเดียวกัน ไม่สวิง และแจ้งเตือนแบบเรียลไทม์ทันที
               </p>
             </div>
 
@@ -198,7 +264,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 <li className="flex items-start justify-between gap-4 border-b border-[#141D2F] pb-2.5">
                   <span>ความยาวเทรนด์ไหล</span>
                   <span className="text-[#E2E8F0] font-medium text-right">
-                    5–6 แท่ง (สีเดียวกัน ไส้น้อย ไม่สวิง)
+                    4–6 แท่งล่าสุด (แท่งเล็ก สีเดียวกัน ไม่สวิง)
                   </span>
                 </li>
                 <li className="flex items-start justify-between gap-4 border-b border-[#141D2F] pb-2.5">
@@ -257,7 +323,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 type="button"
                 onClick={probeServer}
                 className="inline-flex items-center gap-1.5 text-[11px] text-[#94A3B8] hover:text-[#E2E8F0] cursor-pointer"
-                title="กดเพื่อตรวจสอบสถานะเซิร์ฟเวอร์อีกครั้ง"
+                title="สถานะการทำงานของระบบ"
               >
                 <span
                   className={`w-2 h-2 rounded-full ${
@@ -265,25 +331,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                       ? 'bg-[#16C784]'
                       : serverStatus === 'checking'
                         ? 'bg-amber-400 animate-pulse'
-                        : 'bg-rose-400'
+                        : 'bg-[#60A5FA]'
                   }`}
                 />
                 <span>
                   {serverStatus === 'ready'
-                    ? 'เซิร์ฟเวอร์พร้อมใช้งาน'
+                    ? 'พร้อมใช้งาน (ออนไลน์)'
                     : serverStatus === 'checking'
-                      ? 'กำลังเชื่อมเซิร์ฟเวอร์...'
-                      : serverStatus === 'offline'
-                        ? 'ออฟไลน์ (ไม่มีเน็ต)'
-                        : 'เชื่อมเซิร์ฟเวอร์ไม่ได้'}
+                      ? 'กำลังตรวจสอบระบบ...'
+                      : 'โหมดอิสระในเครื่อง (พร้อมใช้งาน)'}
                 </span>
-                {serverStatus !== 'ready' && serverStatus !== 'checking' && (
-                  <RefreshCw className="w-3 h-3 ml-0.5" />
-                )}
               </button>
             </div>
             <p className="mt-1 text-xs text-[#94A3B8]">
-              เข้าสู่ระบบด้วย Gmail และรหัสผ่านของ IQ Option เพื่อดึงกราฟตรงกับโบรกเกอร์
+              {serverStatus === 'ready'
+                ? 'เข้าสู่ระบบด้วย Gmail/รหัสผ่าน หรือ Session SSID ของ IQ Option เพื่อดึงกราฟตรงกับโบรกเกอร์'
+                : 'ทำงานอิสระในเครื่องได้ทันที (เชื่อม IQ Option สดผ่าน Session SSID หรือสแกน Demo ในเครื่อง)'}
             </p>
           </div>
 
@@ -294,7 +357,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 onClick={() => {
                   setAuthTab('credentials');
                   setError(null);
-                  setConnectionIssue(false);
+                  setStandalonePrompt(false);
                 }}
                 className={`py-2 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                   authTab === 'credentials'
@@ -309,7 +372,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 onClick={() => {
                   setAuthTab('ssid');
                   setError(null);
-                  setConnectionIssue(false);
+                  setStandalonePrompt(false);
                 }}
                 className={`py-2 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                   authTab === 'ssid'
@@ -393,39 +456,57 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 </div>
               </>
             ) : (
-              <div>
-                <label
-                  htmlFor="iq-ssid"
-                  className="block text-xs font-medium text-[#CBD5E1] mb-1.5"
-                >
-                  IQ Option Cookie SSID
+              <div className="space-y-3">
+                <div>
+                  <label
+                    htmlFor="iq-ssid"
+                    className="block text-xs font-medium text-[#CBD5E1] mb-1.5"
+                  >
+                    IQ Option Cookie SSID (เชื่อมต่อสดโดยตรง ไม่ง้อเซิร์ฟเวอร์)
+                  </label>
+                  <input
+                    id="iq-ssid"
+                    type="text"
+                    value={ssid}
+                    onChange={(e) => setSsid(e.target.value)}
+                    placeholder="วางค่า ssid cookie จากเบราว์เซอร์ที่ล็อกอิน IQ Option แล้ว"
+                    className="w-full px-3.5 py-2.5 text-sm bg-[#0B111E] border border-[#23304A] rounded-lg text-[#F8FAFC] placeholder-[#64748B] focus:outline-none focus:border-[#3B82F6] font-mono-tabular"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-[#94A3B8] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={rememberSsid}
+                    onChange={(e) => setRememberSsid(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-[#16C784] rounded cursor-pointer"
+                  />
+                  <span>จำ Session SSID ไว้ในเครื่องนี้ (เปิดแอปครั้งหน้ากดเข้าได้เลย)</span>
                 </label>
-                <input
-                  id="iq-ssid"
-                  type="text"
-                  value={ssid}
-                  onChange={(e) => setSsid(e.target.value)}
-                  placeholder="วางค่า ssid cookie จากเบราว์เซอร์ที่ล็อกอิน IQ Option แล้ว"
-                  className="w-full px-3.5 py-2.5 text-sm bg-[#0B111E] border border-[#23304A] rounded-lg text-[#F8FAFC] placeholder-[#64748B] focus:outline-none focus:border-[#3B82F6] font-mono-tabular"
-                />
               </div>
             )}
 
             {error && (
               <div
                 role="alert"
-                className="p-3 rounded-lg bg-red-500/10 border border-red-500/30 text-xs text-red-200 leading-relaxed space-y-2.5"
+                className={`p-3 rounded-lg border text-xs leading-relaxed space-y-2.5 ${
+                  standalonePrompt
+                    ? 'bg-blue-500/10 border-blue-500/30 text-blue-100'
+                    : 'bg-red-500/10 border-red-500/30 text-red-200'
+                }`}
               >
                 <div>{error}</div>
-                {connectionIssue && (
+                {standalonePrompt && (
                   <div className="flex flex-wrap gap-2 pt-1">
                     <button
                       type="button"
-                      onClick={probeServer}
-                      className="px-2.5 py-1.5 rounded bg-[#1D2A42] hover:bg-[#273856] text-[#E2E8F0] font-medium inline-flex items-center gap-1 cursor-pointer"
+                      onClick={() => {
+                        setAuthTab('ssid');
+                        setError(null);
+                        setStandalonePrompt(false);
+                      }}
+                      className="px-2.5 py-1.5 rounded bg-[#2563EB] hover:bg-[#3B82F6] text-white font-medium cursor-pointer"
                     >
-                      <RefreshCw className="w-3 h-3" />
-                      <span>ลองเชื่อมเซิร์ฟเวอร์ใหม่</span>
+                      สลับไปเชื่อมด้วย Session SSID
                     </button>
                     <button
                       type="button"
@@ -446,10 +527,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
               className="w-full py-2.5 px-4 text-sm font-semibold rounded-lg bg-[#2563EB] hover:bg-[#3B82F6] disabled:opacity-60 text-white transition-colors cursor-pointer"
             >
               {loading
-                ? 'กำลังเชื่อมต่อเซิร์ฟเวอร์...'
+                ? 'กำลังเชื่อมต่อ...'
                 : requires2FA
                   ? 'ยืนยันรหัส 2FA และเริ่มสแกน'
-                  : 'เข้าสู่ระบบและเชื่อมต่อ IQ Option'}
+                  : authTab === 'ssid'
+                    ? 'เชื่อมต่อ IQ Option สดทันที'
+                    : 'เข้าสู่ระบบและเชื่อมต่อ IQ Option'}
             </button>
           </form>
 
