@@ -469,9 +469,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
             ทดลองสแกนสตรีมกราฟ 1 นาทีเรียลไทม์ (Demo Feed)
           </button>
 
-          <div className="mt-4 flex items-center justify-center gap-2 text-[11px] text-[#64748B] text-center">
+          <div className="mt-4 flex items-center justify-center gap-1.5 text-[11px] text-[#64748B] text-center whitespace-nowrap">
             <Smartphone className="w-3.5 h-3.5 text-[#60A5FA] shrink-0" />
-            <span>รองรับมือถือ Android (PWA เต็มจอ) และคอมพิวเตอร์ PC</span>
+            <span>รองรับมือถือ Android (PWA) และคอมพิวเตอร์ PC</span>
           </div>
         </div>
       </div>

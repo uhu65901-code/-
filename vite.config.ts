@@ -50,17 +50,17 @@ export default defineConfig(() => {
           navigateFallbackDenylist: [/^\/api\//, /^\/ws/],
           runtimeCaching: [
             {
-              urlPattern: /^\/api\/.*/i,
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
               handler: 'NetworkOnly',
               method: 'GET',
             },
             {
-              urlPattern: /^\/api\/.*/i,
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
               handler: 'NetworkOnly',
               method: 'POST',
             },
             {
-              urlPattern: /^\/api\/.*/i,
+              urlPattern: ({ url }) => url.pathname.startsWith('/api/'),
               handler: 'NetworkOnly',
               method: 'PUT',
             },

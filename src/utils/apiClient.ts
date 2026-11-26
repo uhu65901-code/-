@@ -3,7 +3,7 @@ export type ServerHealthStatus = 'checking' | 'ready' | 'auth_wall' | 'offline' 
 export type ApiPostResult<T> =
   | { ok: true; status: number; data: T }
   | { ok: false; kind: 'http_error'; status: number; data: Record<string, unknown>; message: string }
-  | { ok: false; kind: 'proxy_or_html'; status: number; message: string }
+  | { ok: false; kind: 'backend_missing' | 'proxy_or_html'; status: number; message: string }
   | { ok: false; kind: 'offline' | 'timeout' | 'unreachable'; message: string };
 
 function tryParseJson(text: string): Record<string, unknown> | null {
@@ -16,6 +16,22 @@ function tryParseJson(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function extractErrorMessage(parsed: Record<string, unknown>, status: number): string {
+  if (typeof parsed.error === 'string' && parsed.error) {
+    return parsed.error;
+  }
+  if (parsed.error && typeof parsed.error === 'object') {
+    const nested = parsed.error as Record<string, unknown>;
+    if (typeof nested.message === 'string' && nested.message) {
+      return nested.message;
+    }
+  }
+  if (typeof parsed.message === 'string' && parsed.message) {
+    return parsed.message;
+  }
+  return `เข้าสู่ระบบไม่สำเร็จ (HTTP ${status})`;
 }
 
 export async function checkServerHealth(): Promise<ServerHealthStatus> {
@@ -84,10 +100,23 @@ export async function postJsonWithRetry<T = Record<string, unknown>>(
       const rawText = await res.text();
       const parsed = tryParseJson(rawText);
 
-      // Transient gateway/cold-start errors -> retry
-      if ((res.status === 502 || res.status === 503 || res.status === 504) && attempt < maxAttempts) {
+      // Transient gateway/cold-start/restart errors (including proxy 404 during restart) -> retry
+      if (
+        (res.status === 404 || res.status === 502 || res.status === 503 || res.status === 504) &&
+        attempt < maxAttempts
+      ) {
         await new Promise((r) => setTimeout(r, 750 * attempt));
         continue;
+      }
+
+      if (res.status === 404) {
+        return {
+          ok: false,
+          kind: 'backend_missing',
+          status: 404,
+          message:
+            'ไม่พบเซิร์ฟเวอร์หลังบ้านในขณะนี้ (HTTP 404) — หากเซิร์ฟเวอร์กำลังรีสตาร์ท หรือเปิดผ่านลิงก์/แอปที่ไม่มีหลังบ้าน สามารถกด "ลองเชื่อมเซิร์ฟเวอร์ใหม่" หรือใช้ "โหมดสแกน Demo ในเครื่อง" ได้ทันที',
+        };
       }
 
       if (!parsed || res.redirected) {
@@ -96,7 +125,7 @@ export async function postJsonWithRetry<T = Record<string, unknown>>(
           kind: 'proxy_or_html',
           status: res.status,
           message:
-            'เซิร์ฟเวอร์ตอบกลับไม่ใช่ข้อมูลระบบ (อาจเกิดจากเซสชันเว็บหมดอายุในแอป หรือเซิร์ฟเวอร์กำลังเริ่มทำงาน) กรุณากด "ลองเชื่อมต่อใหม่" หรือเปิดผ่าน Chrome รีเฟรชหน้า 1 ครั้ง',
+            'เซิร์ฟเวอร์ตอบกลับไม่ใช่ข้อมูลระบบ (อาจเกิดจากเซสชันเว็บหมดอายุในแอป หรือเซิร์ฟเวอร์กำลังเริ่มทำงาน) กรุณากด "ลองเชื่อมเซิร์ฟเวอร์ใหม่" หรือเปิดผ่าน Chrome รีเฟรชหน้า 1 ครั้ง',
         };
       }
 
@@ -113,10 +142,7 @@ export async function postJsonWithRetry<T = Record<string, unknown>>(
         kind: 'http_error',
         status: res.status,
         data: parsed,
-        message:
-          typeof parsed.error === 'string' && parsed.error
-            ? parsed.error
-            : `เข้าสู่ระบบไม่สำเร็จ (HTTP ${res.status})`,
+        message: extractErrorMessage(parsed, res.status),
       };
     } catch (err) {
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
