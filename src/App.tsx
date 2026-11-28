@@ -22,16 +22,19 @@ import {
   normalizeAssetHistoryKey,
 } from './lib/performanceStats';
 import {
+  loadChartPanelVisibility,
   loadSavedAiSamples,
   loadSavedAlerts,
   loadSavedConfig,
   loadSavedDecisionRecords,
   saveAiSamplesLocally,
   saveAlertsLocally,
+  saveChartPanelVisibility,
   saveConfigLocally,
   saveDecisionRecordsLocally,
 } from './lib/standaloneStorage';
 import {
+  ChartPanelVisibility,
   ConnectionMode,
   DecisionRecord,
   MAX_AI_TRAINING_SAMPLES,
@@ -76,6 +79,14 @@ export default function App() {
   const [recentChartVerdicts, setRecentChartVerdicts] = useState<
     Record<string, PatternVerdict>
   >({});
+  const [panelVisibility, setPanelVisibility] = useState<ChartPanelVisibility>(() =>
+    loadChartPanelVisibility()
+  );
+
+  const handlePanelVisibilityChange = useCallback((next: ChartPanelVisibility) => {
+    setPanelVisibility(next);
+    saveChartPanelVisibility(next);
+  }, []);
 
   const aiModel = useMemo(() => buildAiPatternModel(aiSamples), [aiSamples]);
 
@@ -1403,6 +1414,8 @@ export default function App() {
                         minMatchScore={config.minMatchScore}
                         candleBodyDisplay={config.candleBodyDisplay}
                         candleWickDisplay={config.candleWickDisplay}
+                        candleDiffDisplay={config.candleDiffDisplay}
+                        panelVisibility={panelVisibility}
                         trainedVerdict={recentChartVerdicts[verdictKey] ?? null}
                         onChangeCandleBodyDisplay={(nextBodyCfg) =>
                           handleFilterChange({ candleBodyDisplay: nextBodyCfg })
@@ -1410,6 +1423,10 @@ export default function App() {
                         onChangeCandleWickDisplay={(nextWickCfg) =>
                           handleFilterChange({ candleWickDisplay: nextWickCfg })
                         }
+                        onChangeCandleDiffDisplay={(nextDiffCfg) =>
+                          handleFilterChange({ candleDiffDisplay: nextDiffCfg })
+                        }
+                        onChangePanelVisibility={handlePanelVisibilityChange}
                         onTrainAiPattern={handleTrainAiFromChart}
                         onActivateSlot={() => setActiveSlotIndex(idx)}
                         onRetryCandles={requestAssetCandlesById}
@@ -1441,6 +1458,18 @@ export default function App() {
               targetMaxCandles={config.targetMaxCandles}
               aiModel={aiModel}
               aiSamples={aiSamples}
+              specialFlowFilter={config.specialFlowFilter}
+              onChangeSpecialFlowFilter={(nextSpecialCfg) =>
+                handleFilterChange({ specialFlowFilter: nextSpecialCfg })
+              }
+              specialLengthFilter={config.specialLengthFilter}
+              onChangeSpecialLengthFilter={(nextLenCfg) =>
+                handleFilterChange({ specialLengthFilter: nextLenCfg })
+              }
+              sidewaysFilter={config.sidewaysFilter}
+              onChangeSidewaysFilter={(nextSidewaysCfg) =>
+                handleFilterChange({ sidewaysFilter: nextSidewaysCfg })
+              }
               onChangeFilters={handleFilterChange}
             />
           </div>

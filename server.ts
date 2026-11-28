@@ -14,6 +14,10 @@ import {
 } from './src/lib/types.ts';
 import { createFeedbackSample } from './src/lib/aiPatternLearner.ts';
 import { sanitizeCandleBodyConfig } from './src/lib/candleBodyStats.ts';
+import { sanitizeCandleDiffConfig } from './src/lib/candleDiffStats.ts';
+import { sanitizeSpecialFlowConfig } from './src/lib/specialFlowRanking.ts';
+import { sanitizeSpecialLengthConfig } from './src/lib/specialLengthRanking.ts';
+import { sanitizeSidewaysConfig } from './src/lib/sidewaysRanking.ts';
 import {
   buildProgramZipBuffer,
   buildStandaloneAppHtmlBuffer,
@@ -334,6 +338,18 @@ async function startServer() {
       candleWickDisplay: body.candleWickDisplay
         ? sanitizeCandleBodyConfig(body.candleWickDisplay)
         : cur.candleWickDisplay,
+      candleDiffDisplay: body.candleDiffDisplay
+        ? sanitizeCandleDiffConfig(body.candleDiffDisplay)
+        : cur.candleDiffDisplay,
+      specialFlowFilter: body.specialFlowFilter
+        ? sanitizeSpecialFlowConfig(body.specialFlowFilter)
+        : cur.specialFlowFilter,
+      specialLengthFilter: body.specialLengthFilter
+        ? sanitizeSpecialLengthConfig(body.specialLengthFilter)
+        : cur.specialLengthFilter,
+      sidewaysFilter: body.sidewaysFilter
+        ? sanitizeSidewaysConfig(body.sidewaysFilter)
+        : cur.sidewaysFilter,
     };
 
     const updated = engine.updateSessionConfig(session.token, nextConfig) ?? DEFAULT_SCANNER_CONFIG;

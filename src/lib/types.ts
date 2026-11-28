@@ -52,6 +52,84 @@ export const DEFAULT_CANDLE_BODY_CONFIG: CandleBodyDisplayConfig = {
   avgFixedBars: 6,
 };
 
+export interface CandleDiffDisplayConfig {
+  mode: 'RANGE' | 'FIXED';
+  minBars: number; // 2..8
+  maxBars: number; // 2..10
+  fixedBars: number; // 2..10 (default 6)
+}
+
+export const DEFAULT_CANDLE_DIFF_CONFIG: CandleDiffDisplayConfig = {
+  mode: 'FIXED',
+  minBars: 4,
+  maxBars: 6,
+  fixedBars: 6,
+};
+
+export interface ChartPanelVisibility {
+  showBody: boolean;
+  showWick: boolean;
+  showDiff: boolean;
+}
+
+export const DEFAULT_CHART_PANEL_VISIBILITY: ChartPanelVisibility = {
+  showBody: true,
+  showWick: true,
+  showDiff: true,
+};
+
+export interface SpecialFlowFilterConfig {
+  barMode: 'RANGE' | 'FIXED';
+  minBars: number; // 2..8
+  maxBars: number; // 2..10
+  fixedBars: number; // 2..10
+  maxBodyDiffRatio: number; // 0.00..2.00 (default 0.40)
+  maxWickDiffRatio: number; // 0.00..2.00 (default 0.30)
+}
+
+export const DEFAULT_SPECIAL_FLOW_CONFIG: SpecialFlowFilterConfig = {
+  barMode: 'RANGE',
+  minBars: 4,
+  maxBars: 6,
+  fixedBars: 5,
+  maxBodyDiffRatio: 0.4,
+  maxWickDiffRatio: 0.3,
+};
+
+export interface SpecialLengthFilterConfig {
+  barMode: 'RANGE' | 'FIXED';
+  minBars: number; // 2..8
+  maxBars: number; // 2..10
+  fixedBars: number; // 2..10 (e.g. 3, 4, 5, 6, 7, 8)
+  maxBodyLengthRatio: number; // Fixed 1.90x by program
+  maxWickLengthRatio: number; // Fixed 0.80x by program
+}
+
+export const DEFAULT_SPECIAL_LENGTH_CONFIG: SpecialLengthFilterConfig = {
+  barMode: 'FIXED',
+  minBars: 4,
+  maxBars: 6,
+  fixedBars: 4,
+  maxBodyLengthRatio: 1.9,
+  maxWickLengthRatio: 0.8,
+};
+
+export interface SidewaysFilterConfig {
+  barMode: 'FIXED' | 'RANGE';
+  fixedBars: number; // 4..20 (presets: 8, 9, 10, 11, 12, 13, 14, 15)
+  minBars: number; // 4..18
+  maxBars: number; // 4..20
+  minBodyLengthRatio: number; // Fixed 2.50x by program
+}
+
+export const DEFAULT_SIDEWAYS_CONFIG: SidewaysFilterConfig = {
+  barMode: 'FIXED',
+  fixedBars: 8,
+  minBars: 8,
+  maxBars: 15,
+  minBodyLengthRatio: 2.5,
+};
+
 export interface ScannerConfig {
   scanWindowBars: number; // default 15 (M15: 15-20 candles max for clear trend visibility)
   targetMinCandles: number; // default 4 (compare latest 4-6 candles)
@@ -74,6 +152,10 @@ export interface ScannerConfig {
   rankRefreshIntervalSec: number; // default 60
   candleBodyDisplay?: CandleBodyDisplayConfig;
   candleWickDisplay?: CandleBodyDisplayConfig;
+  candleDiffDisplay?: CandleDiffDisplayConfig;
+  specialFlowFilter?: SpecialFlowFilterConfig;
+  specialLengthFilter?: SpecialLengthFilterConfig;
+  sidewaysFilter?: SidewaysFilterConfig;
 }
 
 export interface PatternFeatureVector {
@@ -220,4 +302,8 @@ export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
   rankRefreshIntervalSec: 60,
   candleBodyDisplay: { ...DEFAULT_CANDLE_BODY_CONFIG },
   candleWickDisplay: { ...DEFAULT_CANDLE_BODY_CONFIG },
+  candleDiffDisplay: { ...DEFAULT_CANDLE_DIFF_CONFIG },
+  specialFlowFilter: { ...DEFAULT_SPECIAL_FLOW_CONFIG },
+  specialLengthFilter: { ...DEFAULT_SPECIAL_LENGTH_CONFIG },
+  sidewaysFilter: { ...DEFAULT_SIDEWAYS_CONFIG },
 };

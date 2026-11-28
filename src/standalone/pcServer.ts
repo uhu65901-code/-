@@ -8,6 +8,10 @@ import { loginWithIqOption, verifyIqOption2FA } from '../server/iqOptionClient.t
 import { MarketScannerEngine, UserSession } from '../server/marketEngine.ts';
 import { DEFAULT_SCANNER_CONFIG, ScannerConfig } from '../lib/types.ts';
 import { sanitizeCandleBodyConfig } from '../lib/candleBodyStats.ts';
+import { sanitizeCandleDiffConfig } from '../lib/candleDiffStats.ts';
+import { sanitizeSpecialFlowConfig } from '../lib/specialFlowRanking.ts';
+import { sanitizeSpecialLengthConfig } from '../lib/specialLengthRanking.ts';
+import { sanitizeSidewaysConfig } from '../lib/sidewaysRanking.ts';
 
 interface AuthedRequest extends Request {
   userSession?: UserSession;
@@ -301,6 +305,18 @@ function startStandaloneServer() {
       candleWickDisplay: body.candleWickDisplay
         ? sanitizeCandleBodyConfig(body.candleWickDisplay)
         : cur.candleWickDisplay,
+      candleDiffDisplay: body.candleDiffDisplay
+        ? sanitizeCandleDiffConfig(body.candleDiffDisplay)
+        : cur.candleDiffDisplay,
+      specialFlowFilter: body.specialFlowFilter
+        ? sanitizeSpecialFlowConfig(body.specialFlowFilter)
+        : cur.specialFlowFilter,
+      specialLengthFilter: body.specialLengthFilter
+        ? sanitizeSpecialLengthConfig(body.specialLengthFilter)
+        : cur.specialLengthFilter,
+      sidewaysFilter: body.sidewaysFilter
+        ? sanitizeSidewaysConfig(body.sidewaysFilter)
+        : cur.sidewaysFilter,
     };
 
     const updated = engine.updateSessionConfig(session.token, nextConfig) ?? DEFAULT_SCANNER_CONFIG;

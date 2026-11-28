@@ -1,10 +1,13 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
+  ArrowLeftRight,
   ArrowUp,
   BarChart3,
   Brain,
   CheckCircle2,
+  Eye,
+  EyeOff,
   RotateCcw,
   XCircle,
   ZoomIn,
@@ -18,11 +21,19 @@ import {
   computeCandleBodyWindowSummary,
   sanitizeCandleBodyConfig,
 } from '../lib/candleBodyStats';
+import {
+  computeCandleDiffWindowSummary,
+  sanitizeCandleDiffConfig,
+} from '../lib/candleDiffStats';
 import { computeCandleWickWindowSummary } from '../lib/candleWickStats';
 import { getCandleMetrics } from '../lib/trendDetector';
 import {
   CandleBodyDisplayConfig,
+  CandleDiffDisplayConfig,
+  ChartPanelVisibility,
   DEFAULT_CANDLE_BODY_CONFIG,
+  DEFAULT_CANDLE_DIFF_CONFIG,
+  DEFAULT_CHART_PANEL_VISIBILITY,
   PatternVerdict,
   ScannedAssetState,
   TrendDirection,
@@ -39,9 +50,13 @@ interface CandlestickChartProps {
   minMatchScore?: number;
   candleBodyDisplay?: CandleBodyDisplayConfig;
   candleWickDisplay?: CandleBodyDisplayConfig;
+  candleDiffDisplay?: CandleDiffDisplayConfig;
+  panelVisibility?: ChartPanelVisibility;
   trainedVerdict?: PatternVerdict | null;
   onChangeCandleBodyDisplay?: (next: CandleBodyDisplayConfig) => void;
   onChangeCandleWickDisplay?: (next: CandleBodyDisplayConfig) => void;
+  onChangeCandleDiffDisplay?: (next: CandleDiffDisplayConfig) => void;
+  onChangePanelVisibility?: (next: ChartPanelVisibility) => void;
   onTrainAiPattern?: (
     assetState: ScannedAssetState,
     verdict: PatternVerdict,
@@ -92,6 +107,19 @@ function getAvgPresetKey(cfg: CandleBodyDisplayConfig): string {
   return 'custom';
 }
 
+function getDiffPresetKey(cfg: CandleDiffDisplayConfig): string {
+  if (cfg.mode === 'FIXED') {
+    if ([4, 5, 6, 7, 8].includes(cfg.fixedBars)) {
+      return `fixed-${cfg.fixedBars}`;
+    }
+    return 'custom';
+  }
+  if (cfg.minBars === 2 && cfg.maxBars === 4) return 'range-2-4';
+  if (cfg.minBars === 4 && cfg.maxBars === 6) return 'range-4-6';
+  if (cfg.minBars === 5 && cfg.maxBars === 6) return 'range-5-6';
+  return 'custom';
+}
+
 export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   assetState,
   slotLabel,
@@ -103,9 +131,13 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   minMatchScore = 86,
   candleBodyDisplay,
   candleWickDisplay,
+  candleDiffDisplay,
+  panelVisibility,
   trainedVerdict = null,
   onChangeCandleBodyDisplay,
   onChangeCandleWickDisplay,
+  onChangeCandleDiffDisplay,
+  onChangePanelVisibility,
   onTrainAiPattern,
   onActivateSlot,
   onRetryCandles,
@@ -133,6 +165,13 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   );
   const [showCustomWickBarRange, setShowCustomWickBarRange] = useState(false);
   const [showCustomWickAvgRange, setShowCustomWickAvgRange] = useState(false);
+  const [localDiffConfig, setLocalDiffConfig] = useState<CandleDiffDisplayConfig>(() =>
+    sanitizeCandleDiffConfig(candleDiffDisplay ?? DEFAULT_CANDLE_DIFF_CONFIG)
+  );
+  const [showCustomDiffRange, setShowCustomDiffRange] = useState(false);
+  const [localVisibility, setLocalVisibility] = useState<ChartPanelVisibility>(() =>
+    panelVisibility ?? { ...DEFAULT_CHART_PANEL_VISIBILITY }
+  );
   const dragStateRef = useRef<{ startX: number; startPan: number } | null>(null);
   const pinchStateRef = useRef<{ startDist: number; startZoom: number } | null>(null);
 
@@ -147,6 +186,25 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       setLocalWickConfig(sanitizeCandleBodyConfig(candleWickDisplay));
     }
   }, [candleWickDisplay]);
+
+  useEffect(() => {
+    if (candleDiffDisplay) {
+      setLocalDiffConfig(sanitizeCandleDiffConfig(candleDiffDisplay));
+    }
+  }, [candleDiffDisplay]);
+
+  useEffect(() => {
+    if (panelVisibility) {
+      setLocalVisibility(panelVisibility);
+    }
+  }, [panelVisibility]);
+
+  const activeVisibility = panelVisibility ?? localVisibility;
+  const updateVisibility = (patch: Partial<ChartPanelVisibility>) => {
+    const next: ChartPanelVisibility = { ...activeVisibility, ...patch };
+    setLocalVisibility(next);
+    onChangePanelVisibility?.(next);
+  };
 
   const activeBodyConfig = candleBodyDisplay
     ? sanitizeCandleBodyConfig(candleBodyDisplay)
@@ -197,6 +255,30 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   const wickAvgPresetKey = showCustomWickAvgRange
     ? 'custom'
     : getAvgPresetKey(activeWickConfig);
+
+  const activeDiffConfig = candleDiffDisplay
+    ? sanitizeCandleDiffConfig(candleDiffDisplay)
+    : localDiffConfig;
+
+  const updateDiffConfig = (patch: Partial<CandleDiffDisplayConfig>) => {
+    const next = sanitizeCandleDiffConfig({ ...activeDiffConfig, ...patch });
+    setLocalDiffConfig(next);
+    onChangeCandleDiffDisplay?.(next);
+  };
+
+  const diffSummary = useMemo(
+    () =>
+      computeCandleDiffWindowSummary(
+        assetState.candles,
+        activeDiffConfig,
+        assetState.analysis.runLength
+      ),
+    [assetState.candles, activeDiffConfig, assetState.analysis.runLength]
+  );
+
+  const diffPresetKey = showCustomDiffRange
+    ? 'custom'
+    : getDiffPresetKey(activeDiffConfig);
 
   const safeDecimals = Number.isFinite(assetState.asset.decimals)
     ? Math.min(8, Math.max(0, Math.round(assetState.asset.decimals)))
@@ -1177,8 +1259,100 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         </div>
       </div>
 
-      {/* Live Candle Body Length Window (5-6 bars + real-time last bar + post-close average) */}
+      {/* Compact Panel Visibility Toggle Bar */}
       {assetState.candles.length > 0 && (
+        <div
+          data-testid="chart-panels-toolbar"
+          onClick={(e) => e.stopPropagation()}
+          className="border-t border-[#1A2438] bg-[#0A101D] px-3.5 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[11px]"
+        >
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span className="text-[#64748B] font-medium mr-0.5">หน้าต่างข้อมูล:</span>
+            <button
+              type="button"
+              data-testid="toggle-body-window"
+              aria-pressed={activeVisibility.showBody}
+              onClick={() => updateVisibility({ showBody: !activeVisibility.showBody })}
+              className={`px-2 py-1 rounded-md border inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                activeVisibility.showBody
+                  ? 'bg-[#142038] border-[#2C426B] text-[#60A5FA]'
+                  : 'bg-[#0F172A] border-[#1E293B] text-[#64748B] hover:text-[#CBD5E1]'
+              }`}
+            >
+              {activeVisibility.showBody ? (
+                <Eye className="w-3 h-3 shrink-0" />
+              ) : (
+                <EyeOff className="w-3 h-3 shrink-0" />
+              )}
+              <span>ปริมาณเนื้อเทียน</span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="toggle-wick-window"
+              aria-pressed={activeVisibility.showWick}
+              onClick={() => updateVisibility({ showWick: !activeVisibility.showWick })}
+              className={`px-2 py-1 rounded-md border inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                activeVisibility.showWick
+                  ? 'bg-[#112622] border-emerald-500/40 text-emerald-300'
+                  : 'bg-[#0F172A] border-[#1E293B] text-[#64748B] hover:text-[#CBD5E1]'
+              }`}
+            >
+              {activeVisibility.showWick ? (
+                <Eye className="w-3 h-3 shrink-0" />
+              ) : (
+                <EyeOff className="w-3 h-3 shrink-0" />
+              )}
+              <span>ปริมาณไส้เทียน</span>
+            </button>
+
+            <button
+              type="button"
+              data-testid="toggle-diff-window"
+              aria-pressed={activeVisibility.showDiff}
+              onClick={() => updateVisibility({ showDiff: !activeVisibility.showDiff })}
+              className={`px-2 py-1 rounded-md border inline-flex items-center gap-1 cursor-pointer transition-colors ${
+                activeVisibility.showDiff
+                  ? 'bg-[#171E36] border-amber-500/40 text-amber-300'
+                  : 'bg-[#0F172A] border-[#1E293B] text-[#64748B] hover:text-[#CBD5E1]'
+              }`}
+            >
+              {activeVisibility.showDiff ? (
+                <Eye className="w-3 h-3 shrink-0" />
+              ) : (
+                <EyeOff className="w-3 h-3 shrink-0" />
+              )}
+              <span>ความต่างเนื้อ/ไส้</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            data-testid="toggle-all-windows"
+            onClick={() => {
+              const allVisible =
+                activeVisibility.showBody &&
+                activeVisibility.showWick &&
+                activeVisibility.showDiff;
+              updateVisibility({
+                showBody: !allVisible,
+                showWick: !allVisible,
+                showDiff: !allVisible,
+              });
+            }}
+            className="px-2 py-1 rounded-md bg-[#0F172A] hover:bg-[#182236] border border-[#1E293B] text-[#94A3B8] hover:text-[#E2E8F0] cursor-pointer whitespace-nowrap"
+          >
+            {activeVisibility.showBody &&
+            activeVisibility.showWick &&
+            activeVisibility.showDiff
+              ? 'ซ่อนทุกหน้าต่าง'
+              : 'แสดงทุกหน้าต่าง'}
+          </button>
+        </div>
+      )}
+
+      {/* Live Candle Body Length Window (5-6 bars + real-time last bar + post-close average) */}
+      {assetState.candles.length > 0 && activeVisibility.showBody && (
         <div
           data-testid="candle-body-window"
           onClick={(e) => e.stopPropagation()}
@@ -1384,6 +1558,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                   <span className="text-[10px] text-[#94A3B8]">แท่ง</span>
                 </div>
               )}
+
+              <button
+                type="button"
+                data-testid="hide-body-window-btn"
+                onClick={() => updateVisibility({ showBody: false })}
+                aria-label="ซ่อนหน้าต่างปริมาณเนื้อเทียน"
+                title="ซ่อนหน้าต่างนี้"
+                className="px-2 py-1 rounded-lg bg-[#0F172A] hover:bg-[#182236] border border-[#1E293B] text-[#94A3B8] hover:text-[#E2E8F0] inline-flex items-center gap-1 cursor-pointer"
+              >
+                <EyeOff className="w-3 h-3" />
+                <span>ซ่อน</span>
+              </button>
             </div>
           </div>
 
@@ -1493,7 +1679,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
       )}
 
       {/* Live Candle Wick Volume Window (same layout as body window, independent controls) */}
-      {assetState.candles.length > 0 && (
+      {assetState.candles.length > 0 && activeVisibility.showWick && (
         <div
           data-testid="candle-wick-window"
           onClick={(e) => e.stopPropagation()}
@@ -1699,6 +1885,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                   <span className="text-[10px] text-[#94A3B8]">แท่ง</span>
                 </div>
               )}
+
+              <button
+                type="button"
+                data-testid="hide-wick-window-btn"
+                onClick={() => updateVisibility({ showWick: false })}
+                aria-label="ซ่อนหน้าต่างปริมาณไส้เทียน"
+                title="ซ่อนหน้าต่างนี้"
+                className="px-2 py-1 rounded-lg bg-[#0F172A] hover:bg-[#182236] border border-[#1E293B] text-[#94A3B8] hover:text-[#E2E8F0] inline-flex items-center gap-1 cursor-pointer"
+              >
+                <EyeOff className="w-3 h-3" />
+                <span>ซ่อน</span>
+              </button>
             </div>
           </div>
 
@@ -1803,6 +2001,221 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                 </span>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live Candle Body & Wick Difference Window (compared against the latest candle) */}
+      {assetState.candles.length > 0 && activeVisibility.showDiff && (
+        <div
+          data-testid="candle-diff-window"
+          onClick={(e) => e.stopPropagation()}
+          className={`border-t border-[#1A2438] bg-[#0B111E] ${
+            compact ? 'px-2.5 py-1.5 space-y-1.5' : 'px-3.5 py-2 space-y-2'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <ArrowLeftRight className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span className="text-xs font-semibold text-[#E2E8F0]">
+                ความต่างของเนื้อเทียนและไส้เทียน (เทียบแท่งล่าสุด)
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-[#141D2F] border border-[#23304A] text-[10px] font-mono-tabular text-amber-300 whitespace-nowrap">
+                {diffSummary.displayLabel}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <div className="flex items-center gap-1.5 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 py-1">
+                <label
+                  htmlFor={`diff-bars-${assetState.asset.id}`}
+                  className="text-[#94A3B8] whitespace-nowrap"
+                >
+                  เปรียบเทียบ:
+                </label>
+                <select
+                  id={`diff-bars-${assetState.asset.id}`}
+                  data-testid="candle-diff-bars-select"
+                  aria-label="กำหนดจำนวนแท่งเปรียบเทียบความต่างเนื้อเทียนและไส้เทียน"
+                  value={diffPresetKey}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') {
+                      setShowCustomDiffRange(true);
+                      return;
+                    }
+                    setShowCustomDiffRange(false);
+                    if (v === 'range-2-4') {
+                      updateDiffConfig({ mode: 'RANGE', minBars: 2, maxBars: 4 });
+                    } else if (v === 'range-4-6') {
+                      updateDiffConfig({ mode: 'RANGE', minBars: 4, maxBars: 6 });
+                    } else if (v === 'range-5-6') {
+                      updateDiffConfig({ mode: 'RANGE', minBars: 5, maxBars: 6 });
+                    } else if (v.startsWith('fixed-')) {
+                      const n = Number(v.replace('fixed-', ''));
+                      updateDiffConfig({ mode: 'FIXED', fixedBars: n });
+                    }
+                  }}
+                  className="bg-transparent text-amber-300 font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="fixed-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    6 แท่งล่าสุด (แนะนำ)
+                  </option>
+                  <option value="fixed-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4 แท่งล่าสุด
+                  </option>
+                  <option value="fixed-5" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5 แท่งล่าสุด
+                  </option>
+                  <option value="fixed-7" className="bg-[#0D1422] text-[#F8FAFC]">
+                    7 แท่งล่าสุด
+                  </option>
+                  <option value="fixed-8" className="bg-[#0D1422] text-[#F8FAFC]">
+                    8 แท่งล่าสุด
+                  </option>
+                  <option value="range-4-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4–6 แท่งล่าสุด
+                  </option>
+                  <option value="range-2-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    2–4 แท่งล่าสุด
+                  </option>
+                  <option value="range-5-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5–6 แท่งล่าสุด
+                  </option>
+                  <option value="custom" className="bg-[#0D1422] text-[#F8FAFC]">
+                    กำหนดเอง...
+                  </option>
+                </select>
+              </div>
+
+              {diffPresetKey === 'custom' && (
+                <div className="flex items-center gap-1 bg-[#0F172A] border border-[#273652] rounded-lg px-2 py-0.5 font-mono-tabular">
+                  <input
+                    type="number"
+                    min={2}
+                    max={10}
+                    aria-label="จำนวนแท่งเปรียบเทียบความต่างกำหนดเอง"
+                    value={activeDiffConfig.fixedBars}
+                    onChange={(e) => {
+                      const n = Math.min(10, Math.max(2, Number(e.target.value) || 6));
+                      updateDiffConfig({ mode: 'FIXED', fixedBars: n });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-amber-300"
+                  />
+                  <span className="text-[10px] text-[#94A3B8]">แท่ง</span>
+                </div>
+              )}
+
+              <button
+                type="button"
+                data-testid="hide-diff-window-btn"
+                onClick={() => updateVisibility({ showDiff: false })}
+                aria-label="ซ่อนหน้าต่างความต่างเนื้อเทียนและไส้เทียน"
+                title="ซ่อนหน้าต่างนี้"
+                className="px-2 py-1 rounded-lg bg-[#0F172A] hover:bg-[#182236] border border-[#1E293B] text-[#94A3B8] hover:text-[#E2E8F0] inline-flex items-center gap-1 cursor-pointer"
+              >
+                <EyeOff className="w-3 h-3" />
+                <span>ซ่อน</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Summary Cards: Body Diff & Wick Diff vs Latest Candle */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <div className="rounded-lg px-3 py-2 bg-[#111B30] border border-[#273B63] flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-[#E2E8F0]">
+                  ความต่างของเนื้อเทียน {diffSummary.comparedCount} แท่งล่าสุด
+                </div>
+                <div className="text-[10px] text-[#94A3B8] mt-0.5">
+                  ช่วงห่างรวม {diffSummary.bodySpreadRatio.toFixed(2)}× · ปิดแท่งล่าสุด ≤{' '}
+                  <span className="font-mono-tabular text-[#CBD5E1]">
+                    {diffSummary.closedBodyDiffVsLatest.toFixed(2)}×
+                  </span>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-[10px] text-[#94A3B8]">ไม่เกิน</div>
+                <div
+                  data-testid="candle-diff-body-value"
+                  className={`font-mono-tabular text-base font-bold ${
+                    diffSummary.bodyDiffVsLatest <= 0.4
+                      ? 'text-sky-300'
+                      : 'text-amber-300'
+                  }`}
+                >
+                  {diffSummary.bodyDiffVsLatest.toFixed(2)}×
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-lg px-3 py-2 bg-[#111B30] border border-[#273B63] flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-[11px] font-semibold text-[#E2E8F0]">
+                  ความต่างของไส้เทียน {diffSummary.comparedCount} แท่งล่าสุด
+                </div>
+                <div className="text-[10px] text-[#94A3B8] mt-0.5">
+                  ช่วงห่างรวม {diffSummary.wickSpreadRatio.toFixed(2)}× · ปิดแท่งล่าสุด ≤{' '}
+                  <span className="font-mono-tabular text-[#CBD5E1]">
+                    {diffSummary.closedWickDiffVsLatest.toFixed(2)}×
+                  </span>
+                </div>
+              </div>
+              <div className="text-right shrink-0">
+                <div className="text-[10px] text-[#94A3B8]">ไม่เกิน</div>
+                <div
+                  data-testid="candle-diff-wick-value"
+                  className={`font-mono-tabular text-base font-bold ${
+                    diffSummary.wickDiffVsLatest <= 0.3
+                      ? 'text-emerald-400'
+                      : 'text-amber-300'
+                  }`}
+                >
+                  {diffSummary.wickDiffVsLatest.toFixed(2)}×
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Per-bar Difference Breakdown vs Latest Candle */}
+          <div
+            data-testid="candle-diff-bars-grid"
+            className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-1.5"
+          >
+            {diffSummary.bars.map((bar) => (
+              <div
+                key={`diff-${bar.time}-${bar.index}`}
+                data-testid={`candle-diff-bar-${bar.index}`}
+                className={`rounded-lg px-2 py-1 border text-[10px] font-mono-tabular ${
+                  bar.isLive
+                    ? 'bg-[#121D33] border-[#3B82F6]/60'
+                    : 'bg-[#0F172A] border-[#1E293B]'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1 font-sans">
+                  <span className="text-[#CBD5E1] font-medium">แท่ง {bar.index}</span>
+                  <span className={bar.isLive ? 'text-[#60A5FA] font-semibold' : 'text-[#64748B]'}>
+                    {bar.isLive ? 'ล่าสุด (ฐาน)' : formatTime(bar.time)}
+                  </span>
+                </div>
+                <div className="mt-0.5 flex items-center justify-between gap-1">
+                  <span className="text-[#94A3B8]">เนื้อ</span>
+                  <span className="text-sky-300 font-semibold">
+                    {bar.isLive
+                      ? `${bar.bodyRatio.toFixed(2)}×`
+                      : `±${bar.bodyDiffFromLatest.toFixed(2)}×`}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between gap-1">
+                  <span className="text-[#94A3B8]">ไส้</span>
+                  <span className="text-emerald-400 font-semibold">
+                    {bar.isLive
+                      ? `${bar.wickRatio.toFixed(2)}×`
+                      : `±${bar.wickDiffFromLatest.toFixed(2)}×`}
+                  </span>
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

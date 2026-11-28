@@ -1,6 +1,12 @@
 import { sanitizeCandleBodyConfig } from './candleBodyStats';
+import { sanitizeCandleDiffConfig } from './candleDiffStats';
+import { sanitizeSpecialFlowConfig } from './specialFlowRanking';
+import { sanitizeSpecialLengthConfig } from './specialLengthRanking';
+import { sanitizeSidewaysConfig } from './sidewaysRanking';
 import { deduplicateAlertsByAsset } from './performanceStats';
 import {
+  ChartPanelVisibility,
+  DEFAULT_CHART_PANEL_VISIBILITY,
   DEFAULT_SCANNER_CONFIG,
   DecisionRecord,
   MAX_AI_TRAINING_SAMPLES,
@@ -14,6 +20,7 @@ const STORAGE_ALERTS_KEY = 'flowtrend_iq_alerts_v2';
 const STORAGE_DECISIONS_KEY = 'flowtrend_iq_decisions_v2';
 const STORAGE_SSID_KEY = 'flowtrend_iq_saved_ssid_v1';
 const STORAGE_AI_SAMPLES_KEY = 'flowtrend_iq_ai_samples_v1';
+const STORAGE_PANEL_VISIBILITY_KEY = 'flowtrend_iq_panel_visibility_v1';
 
 export function loadSavedConfig(): ScannerConfig {
   try {
@@ -38,6 +45,10 @@ export function loadSavedConfig(): ScannerConfig {
       rankRefreshIntervalSec,
       candleBodyDisplay: sanitizeCandleBodyConfig(parsed.candleBodyDisplay),
       candleWickDisplay: sanitizeCandleBodyConfig(parsed.candleWickDisplay),
+      candleDiffDisplay: sanitizeCandleDiffConfig(parsed.candleDiffDisplay),
+      specialFlowFilter: sanitizeSpecialFlowConfig(parsed.specialFlowFilter),
+      specialLengthFilter: sanitizeSpecialLengthConfig(parsed.specialLengthFilter),
+      sidewaysFilter: sanitizeSidewaysConfig(parsed.sidewaysFilter),
     };
   } catch {
     return { ...DEFAULT_SCANNER_CONFIG };
@@ -152,6 +163,45 @@ export function saveSsidLocally(ssid: string): void {
     } else {
       window.localStorage.removeItem(STORAGE_SSID_KEY);
     }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function loadChartPanelVisibility(): ChartPanelVisibility {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) {
+      return { ...DEFAULT_CHART_PANEL_VISIBILITY };
+    }
+    const raw = window.localStorage.getItem(STORAGE_PANEL_VISIBILITY_KEY);
+    if (!raw) return { ...DEFAULT_CHART_PANEL_VISIBILITY };
+    const parsed = JSON.parse(raw) as Partial<ChartPanelVisibility>;
+    return {
+      showBody:
+        typeof parsed.showBody === 'boolean'
+          ? parsed.showBody
+          : DEFAULT_CHART_PANEL_VISIBILITY.showBody,
+      showWick:
+        typeof parsed.showWick === 'boolean'
+          ? parsed.showWick
+          : DEFAULT_CHART_PANEL_VISIBILITY.showWick,
+      showDiff:
+        typeof parsed.showDiff === 'boolean'
+          ? parsed.showDiff
+          : DEFAULT_CHART_PANEL_VISIBILITY.showDiff,
+    };
+  } catch {
+    return { ...DEFAULT_CHART_PANEL_VISIBILITY };
+  }
+}
+
+export function saveChartPanelVisibility(visibility: ChartPanelVisibility): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.setItem(
+      STORAGE_PANEL_VISIBILITY_KEY,
+      JSON.stringify(visibility)
+    );
   } catch {
     // ignore storage errors
   }

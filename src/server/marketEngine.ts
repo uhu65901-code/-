@@ -143,6 +143,17 @@ function buildInitialCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
       delta = sign * step * (0.8 + pseudoRand(i) * 0.3);
       upperWick = step * 1.4;
       lowerWick = step * 1.2;
+    } else if (!isFormingBar && seed.initialPattern === 'SIDEWAYS_BIG') {
+      const bigCount =
+        seed.id === 'cocoa-otc' ? 12 : seed.id === 'usdcop-otc' ? 10 : 9;
+      const dir = closedIdxFromEnd % 2 === 0 ? 1 : -1;
+      if (closedIdxFromEnd < bigCount) {
+        delta = dir * step * (2.65 + pseudoRand(i) * 0.65);
+        upperWick = step * (0.2 + pseudoRand(i + 3) * 1.1);
+        lowerWick = step * (0.2 + pseudoRand(i + 7) * 1.1);
+      } else {
+        delta = dir * step * (0.9 + pseudoRand(i) * 0.2);
+      }
     } else if (!isFormingBar) {
       delta = (pseudoRand(i) > 0.48 ? 1 : -1) * step * (0.7 + pseudoRand(i + 2) * 0.7);
     } else {

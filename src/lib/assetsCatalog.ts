@@ -11,12 +11,13 @@ export interface CatalogSeedAsset extends AssetInfo {
     | 'PULLBACK_UP'
     | 'PULLBACK_DOWN'
     | 'CHOP'
-    | 'BIG_WICKS';
+    | 'BIG_WICKS'
+    | 'SIDEWAYS_BIG';
 }
 
 export const IQ_OPTION_ASSETS: CatalogSeedAsset[] = [
   { id: 'satsusd-otc', iqActiveId: 2290, name: 'SATSUSD-OTC', symbol: '1000Sats (OTC)', category: 'BINARY', isOtc: true, payoutPercent: 83, decimals: 6, basePrice: 0.0445, stepSize: 0.00072, initialPattern: 'DOWN_FLOW' },
-  { id: 'usdcop-otc', iqActiveId: 1865, name: 'USDCOP-OTC', symbol: 'USD/COP (OTC)', category: 'BINARY', isOtc: true, payoutPercent: 83, decimals: 6, basePrice: 3568.4, stepSize: 6.2, initialPattern: 'CHOP' },
+  { id: 'usdcop-otc', iqActiveId: 1865, name: 'USDCOP-OTC', symbol: 'USD/COP (OTC)', category: 'BINARY', isOtc: true, payoutPercent: 83, decimals: 6, basePrice: 3568.4, stepSize: 6.2, initialPattern: 'SIDEWAYS_BIG' },
   { id: 'bitcoin-gold', iqActiveId: 2150, name: 'Bitcoin/Gold', symbol: 'BTC/XAU', category: 'BINARY', isOtc: false, payoutPercent: 85, decimals: 6, basePrice: 16.695, stepSize: 0.0048, initialPattern: 'UP_FLOW' },
   { id: 'sp-gold', iqActiveId: 2151, name: 'S&P/Gold', symbol: 'S&P500/ทองคำ', category: 'BINARY', isOtc: false, payoutPercent: 86, decimals: 6, basePrice: 2.0082, stepSize: 0.00062, initialPattern: 'CHOP' },
   { id: 'fwona-otc', iqActiveId: 2291, name: 'FWONA-OTC', symbol: 'FWONA (OTC)', category: 'DIGITAL', isOtc: true, payoutPercent: 84, decimals: 6, basePrice: 93.12, stepSize: 0.58, initialPattern: 'CHOP' },
@@ -24,7 +25,7 @@ export const IQ_OPTION_ASSETS: CatalogSeedAsset[] = [
   { id: 'usdsar-otc', iqActiveId: 1866, name: 'USDSAR-OTC', symbol: 'USD/SAR (OTC)', category: 'DIGITAL', isOtc: true, payoutPercent: 83, decimals: 6, basePrice: 3.7466, stepSize: 0.000042, initialPattern: 'CHOP' },
   { id: 'nzdcad', iqActiveId: 40, name: 'NZDCAD', symbol: 'NZD/CAD', category: 'BINARY', isOtc: false, payoutPercent: 85, decimals: 6, basePrice: 0.7809, stepSize: 0.00008, initialPattern: 'DOWN_FLOW' },
   { id: 'gbpnzd', iqActiveId: 41, name: 'GBPNZD', symbol: 'GBP/NZD', category: 'BINARY', isOtc: false, payoutPercent: 84, decimals: 6, basePrice: 2.3948, stepSize: 0.00024, initialPattern: 'FORMING_DOWN' },
-  { id: 'cocoa-otc', iqActiveId: 2111, name: 'Cocoa (OTC)', symbol: 'COCOA-OTC', category: 'BINARY', isOtc: true, payoutPercent: 83, decimals: 3, basePrice: 5340.0, stepSize: 7.5, initialPattern: 'CHOP' },
+  { id: 'cocoa-otc', iqActiveId: 2111, name: 'Cocoa (OTC)', symbol: 'COCOA-OTC', category: 'BINARY', isOtc: true, payoutPercent: 83, decimals: 3, basePrice: 5340.0, stepSize: 7.5, initialPattern: 'SIDEWAYS_BIG' },
   { id: 'dogwifhat-otc', iqActiveId: 2280, name: 'Dogwifhat (OTC)', symbol: 'WIFUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 84, decimals: 6, basePrice: 0.1286, stepSize: 0.00085, initialPattern: 'BIG_WICKS' },
   { id: 'eurusd', iqActiveId: 1, name: 'EUR/USD', symbol: 'EURUSD', category: 'BINARY', isOtc: false, payoutPercent: 85, decimals: 6, basePrice: 1.0842, stepSize: 0.00026, initialPattern: 'CHOP' },
   { id: 'eurusd-otc', iqActiveId: 76, name: 'EUR/USD (OTC)', symbol: 'EURUSD-OTC', category: 'BINARY', isOtc: true, payoutPercent: 87, decimals: 6, basePrice: 1.0855, stepSize: 0.00025, initialPattern: 'FORMING_UP' },
@@ -74,5 +75,5 @@ export const IQ_OPTION_ASSETS: CatalogSeedAsset[] = [
   { id: 'aapl-otc', iqActiveId: 2301, name: 'Apple (OTC)', symbol: 'AAPL-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 84, decimals: 3, basePrice: 229.45, stepSize: 0.22, initialPattern: 'FORMING_UP' },
   { id: 'tsla-otc', iqActiveId: 2302, name: 'Tesla (OTC)', symbol: 'TSLA-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 84, decimals: 3, basePrice: 338.12, stepSize: 0.48, initialPattern: 'CHOP' },
   { id: 'nvda-otc', iqActiveId: 2303, name: 'NVIDIA (OTC)', symbol: 'NVDA-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 3, basePrice: 141.65, stepSize: 0.24, initialPattern: 'CHOP' },
-  { id: 'us100-otc', iqActiveId: 2304, name: 'US100 (OTC)', symbol: 'US100-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 2, basePrice: 20815.5, stepSize: 12.5, initialPattern: 'CHOP' },
+  { id: 'us100-otc', iqActiveId: 2304, name: 'US100 (OTC)', symbol: 'US100-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 2, basePrice: 20815.5, stepSize: 12.5, initialPattern: 'SIDEWAYS_BIG' },
 ];
