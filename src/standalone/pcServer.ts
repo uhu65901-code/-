@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import { loginWithIqOption, verifyIqOption2FA } from '../server/iqOptionClient.ts';
 import { MarketScannerEngine, UserSession } from '../server/marketEngine.ts';
 import { DEFAULT_SCANNER_CONFIG, ScannerConfig } from '../lib/types.ts';
+import { sanitizeCandleBodyConfig } from '../lib/candleBodyStats.ts';
 
 interface AuthedRequest extends Request {
   userSession?: UserSession;
@@ -254,7 +255,7 @@ function startStandaloneServer() {
       ),
       minMatchScore: Math.round(clampNumber(body.minMatchScore, 75, 98, cur.minMatchScore)),
       maxCounterCandles: Math.round(
-        clampNumber(body.maxCounterCandles, 0, 1, cur.maxCounterCandles)
+        clampNumber(body.maxCounterCandles, 0, 2, cur.maxCounterCandles)
       ),
       maxBodyToMedianRatio: clampNumber(
         body.maxBodyToMedianRatio,
@@ -294,6 +295,12 @@ function startStandaloneServer() {
         typeof body.includeFormingInList === 'boolean'
           ? body.includeFormingInList
           : cur.includeFormingInList,
+      candleBodyDisplay: body.candleBodyDisplay
+        ? sanitizeCandleBodyConfig(body.candleBodyDisplay)
+        : cur.candleBodyDisplay,
+      candleWickDisplay: body.candleWickDisplay
+        ? sanitizeCandleBodyConfig(body.candleWickDisplay)
+        : cur.candleWickDisplay,
     };
 
     const updated = engine.updateSessionConfig(session.token, nextConfig) ?? DEFAULT_SCANNER_CONFIG;

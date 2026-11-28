@@ -3,7 +3,15 @@ import type { AssetInfo } from './types.ts';
 export interface CatalogSeedAsset extends AssetInfo {
   basePrice: number;
   stepSize: number;
-  initialPattern: 'UP_FLOW' | 'DOWN_FLOW' | 'FORMING_UP' | 'FORMING_DOWN' | 'CHOP' | 'BIG_WICKS';
+  initialPattern:
+    | 'UP_FLOW'
+    | 'DOWN_FLOW'
+    | 'FORMING_UP'
+    | 'FORMING_DOWN'
+    | 'PULLBACK_UP'
+    | 'PULLBACK_DOWN'
+    | 'CHOP'
+    | 'BIG_WICKS';
 }
 
 export const IQ_OPTION_ASSETS: CatalogSeedAsset[] = [
@@ -28,16 +36,16 @@ export const IQ_OPTION_ASSETS: CatalogSeedAsset[] = [
   { id: 'audjpy-otc', iqActiveId: 79, name: 'AUD/JPY (OTC)', symbol: 'AUDJPY-OTC', category: 'BINARY', isOtc: true, payoutPercent: 85, decimals: 3, basePrice: 100.52, stepSize: 0.026, initialPattern: 'CHOP' },
   { id: 'gbpjpy', iqActiveId: 5, name: 'GBP/JPY', symbol: 'GBPJPY', category: 'BINARY', isOtc: false, payoutPercent: 84, decimals: 3, basePrice: 195.82, stepSize: 0.045, initialPattern: 'CHOP' },
   { id: 'gbpjpy-otc', iqActiveId: 80, name: 'GBP/JPY (OTC)', symbol: 'GBPJPY-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 86, decimals: 3, basePrice: 195.95, stepSize: 0.042, initialPattern: 'CHOP' },
-  { id: 'eurjpy', iqActiveId: 6, name: 'EUR/JPY', symbol: 'EURJPY', category: 'BINARY', isOtc: false, payoutPercent: 84, decimals: 3, basePrice: 167.24, stepSize: 0.036, initialPattern: 'CHOP' },
+  { id: 'eurjpy', iqActiveId: 6, name: 'EUR/JPY', symbol: 'EURJPY', category: 'BINARY', isOtc: false, payoutPercent: 84, decimals: 3, basePrice: 167.24, stepSize: 0.036, initialPattern: 'PULLBACK_UP' },
   { id: 'eurjpy-otc', iqActiveId: 81, name: 'EUR/JPY (OTC)', symbol: 'EURJPY-OTC', category: 'BINARY', isOtc: true, payoutPercent: 86, decimals: 3, basePrice: 167.38, stepSize: 0.034, initialPattern: 'CHOP' },
   { id: 'audusd', iqActiveId: 99, name: 'AUD/USD', symbol: 'AUDUSD', category: 'BINARY', isOtc: false, payoutPercent: 83, decimals: 6, basePrice: 0.6538, stepSize: 0.00024, initialPattern: 'BIG_WICKS' },
   { id: 'audusd-otc', iqActiveId: 82, name: 'AUD/USD (OTC)', symbol: 'AUDUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 6, basePrice: 0.6542, stepSize: 0.00022, initialPattern: 'CHOP' },
   { id: 'usdcad', iqActiveId: 7, name: 'USD/CAD', symbol: 'USDCAD', category: 'BINARY', isOtc: false, payoutPercent: 83, decimals: 6, basePrice: 1.3982, stepSize: 0.00027, initialPattern: 'CHOP' },
-  { id: 'usdcad-otc', iqActiveId: 83, name: 'USD/CAD (OTC)', symbol: 'USDCAD-OTC', category: 'BINARY', isOtc: true, payoutPercent: 85, decimals: 6, basePrice: 1.399, stepSize: 0.00025, initialPattern: 'CHOP' },
+  { id: 'usdcad-otc', iqActiveId: 83, name: 'USD/CAD (OTC)', symbol: 'USDCAD-OTC', category: 'BINARY', isOtc: true, payoutPercent: 85, decimals: 6, basePrice: 1.399, stepSize: 0.00025, initialPattern: 'PULLBACK_DOWN' },
   { id: 'usdchf', iqActiveId: 8, name: 'USD/CHF', symbol: 'USDCHF', category: 'BINARY', isOtc: false, payoutPercent: 82, decimals: 6, basePrice: 0.8842, stepSize: 0.00021, initialPattern: 'CHOP' },
   { id: 'usdchf-otc', iqActiveId: 84, name: 'USD/CHF (OTC)', symbol: 'USDCHF-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 6, basePrice: 0.8851, stepSize: 0.0002, initialPattern: 'CHOP' },
   { id: 'nzdusd', iqActiveId: 9, name: 'NZD/USD', symbol: 'NZDUSD', category: 'BINARY', isOtc: false, payoutPercent: 82, decimals: 6, basePrice: 0.5912, stepSize: 0.00019, initialPattern: 'CHOP' },
-  { id: 'nzdusd-otc', iqActiveId: 85, name: 'NZD/USD (OTC)', symbol: 'NZDUSD-OTC', category: 'BINARY', isOtc: true, payoutPercent: 85, decimals: 6, basePrice: 0.592, stepSize: 0.00019, initialPattern: 'CHOP' },
+  { id: 'nzdusd-otc', iqActiveId: 85, name: 'NZD/USD (OTC)', symbol: 'NZDUSD-OTC', category: 'BINARY', isOtc: true, payoutPercent: 85, decimals: 6, basePrice: 0.592, stepSize: 0.00019, initialPattern: 'PULLBACK_DOWN' },
   { id: 'eurgbp', iqActiveId: 10, name: 'EUR/GBP', symbol: 'EURGBP', category: 'BINARY', isOtc: false, payoutPercent: 84, decimals: 6, basePrice: 0.8554, stepSize: 0.00018, initialPattern: 'CHOP' },
   { id: 'eurgbp-otc', iqActiveId: 86, name: 'EUR/GBP (OTC)', symbol: 'EURGBP-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 86, decimals: 6, basePrice: 0.856, stepSize: 0.00017, initialPattern: 'CHOP' },
   { id: 'euraud', iqActiveId: 11, name: 'EUR/AUD', symbol: 'EURAUD', category: 'BINARY', isOtc: false, payoutPercent: 82, decimals: 6, basePrice: 1.6584, stepSize: 0.00031, initialPattern: 'CHOP' },
@@ -54,7 +62,7 @@ export const IQ_OPTION_ASSETS: CatalogSeedAsset[] = [
   { id: 'hbar-otc', iqActiveId: 2282, name: 'HBAR (OTC)', symbol: 'HBARUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 84, decimals: 5, basePrice: 0.2145, stepSize: 0.0009, initialPattern: 'CHOP' },
   { id: 'cotton-otc', iqActiveId: 2112, name: 'Cotton (OTC)', symbol: 'COTTON-OTC', category: 'BINARY', isOtc: true, payoutPercent: 82, decimals: 3, basePrice: 71.42, stepSize: 0.14, initialPattern: 'CHOP' },
   { id: 'gold-silver', iqActiveId: 74, name: 'Gold/Silver', symbol: 'XAU/XAG', category: 'BINARY', isOtc: false, payoutPercent: 81, decimals: 3, basePrice: 84.615, stepSize: 0.11, initialPattern: 'CHOP' },
-  { id: 'xauusd-otc', iqActiveId: 2100, name: 'XAU/USD (OTC)', symbol: 'XAUUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 3, basePrice: 2642.5, stepSize: 1.45, initialPattern: 'CHOP' },
+  { id: 'xauusd-otc', iqActiveId: 2100, name: 'XAU/USD (OTC)', symbol: 'XAUUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 3, basePrice: 2642.5, stepSize: 1.45, initialPattern: 'PULLBACK_UP' },
   { id: 'btcusd-otc', iqActiveId: 2201, name: 'BTC/USD (OTC)', symbol: 'BTCUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 86, decimals: 2, basePrice: 94210.0, stepSize: 45.0, initialPattern: 'CHOP' },
   { id: 'ethusd-otc', iqActiveId: 2202, name: 'ETH/USD (OTC)', symbol: 'ETHUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 85, decimals: 2, basePrice: 3315.4, stepSize: 2.8, initialPattern: 'CHOP' },
   { id: 'solusd-otc', iqActiveId: 2203, name: 'SOL/USD (OTC)', symbol: 'SOLUSD-OTC', category: 'DIGITAL', isOtc: true, payoutPercent: 84, decimals: 3, basePrice: 238.45, stepSize: 0.34, initialPattern: 'CHOP' },

@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import {
   ArrowDown,
   ArrowUp,
+  BarChart3,
   Brain,
   CheckCircle2,
   RotateCcw,
@@ -9,9 +10,23 @@ import {
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
-import { assessChartFlowForAiTraining } from '../lib/aiPatternLearner';
+import {
+  assessChartFlowForAiTraining,
+  computeFeatureAlignmentPct,
+} from '../lib/aiPatternLearner';
+import {
+  computeCandleBodyWindowSummary,
+  sanitizeCandleBodyConfig,
+} from '../lib/candleBodyStats';
+import { computeCandleWickWindowSummary } from '../lib/candleWickStats';
 import { getCandleMetrics } from '../lib/trendDetector';
-import { PatternVerdict, ScannedAssetState, TrendDirection } from '../lib/types';
+import {
+  CandleBodyDisplayConfig,
+  DEFAULT_CANDLE_BODY_CONFIG,
+  PatternVerdict,
+  ScannedAssetState,
+  TrendDirection,
+} from '../lib/types';
 
 interface CandlestickChartProps {
   assetState: ScannedAssetState;
@@ -22,7 +37,11 @@ interface CandlestickChartProps {
   targetMinCandles?: number;
   targetMaxCandles?: number;
   minMatchScore?: number;
+  candleBodyDisplay?: CandleBodyDisplayConfig;
+  candleWickDisplay?: CandleBodyDisplayConfig;
   trainedVerdict?: PatternVerdict | null;
+  onChangeCandleBodyDisplay?: (next: CandleBodyDisplayConfig) => void;
+  onChangeCandleWickDisplay?: (next: CandleBodyDisplayConfig) => void;
   onTrainAiPattern?: (
     assetState: ScannedAssetState,
     verdict: PatternVerdict,
@@ -46,6 +65,33 @@ function formatNextMinute(unixSec: number): string {
   return `${hh}:${mm}`;
 }
 
+function getBarPresetKey(cfg: CandleBodyDisplayConfig): string {
+  if (cfg.mode === 'RANGE') {
+    if (cfg.minBars === 2 && cfg.maxBars === 4) return 'range-2-4';
+    if (cfg.minBars === 4 && cfg.maxBars === 6) return 'range-4-6';
+    if (cfg.minBars === 5 && cfg.maxBars === 6) return 'range-5-6';
+    return 'custom';
+  }
+  if ([4, 5, 6, 7, 8].includes(cfg.fixedBars)) {
+    return `fixed-${cfg.fixedBars}`;
+  }
+  return 'custom';
+}
+
+function getAvgPresetKey(cfg: CandleBodyDisplayConfig): string {
+  if (cfg.avgMode === 'SYNC') return 'sync';
+  if (cfg.avgMode === 'RANGE') {
+    if (cfg.avgMinBars === 2 && cfg.avgMaxBars === 4) return 'range-2-4';
+    if (cfg.avgMinBars === 4 && cfg.avgMaxBars === 6) return 'range-4-6';
+    if (cfg.avgMinBars === 5 && cfg.avgMaxBars === 6) return 'range-5-6';
+    return 'custom';
+  }
+  if ([4, 5, 6, 7, 8].includes(cfg.avgFixedBars)) {
+    return `fixed-${cfg.avgFixedBars}`;
+  }
+  return 'custom';
+}
+
 export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   assetState,
   slotLabel,
@@ -55,14 +101,18 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
   targetMinCandles = 4,
   targetMaxCandles = 6,
   minMatchScore = 86,
+  candleBodyDisplay,
+  candleWickDisplay,
   trainedVerdict = null,
+  onChangeCandleBodyDisplay,
+  onChangeCandleWickDisplay,
   onTrainAiPattern,
   onActivateSlot,
   onRetryCandles,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const [size, setSize] = useState({ width: 720, height: compact ? 290 : 440 });
+  const [size, setSize] = useState({ width: 720, height: compact ? 250 : 310 });
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
   const m15DefaultBars = Math.min(20, Math.max(15, Math.round(scanWindowBars)));
@@ -73,8 +123,80 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     type: 'ok' | 'warn';
     text: string;
   } | null>(null);
+  const [localBodyConfig, setLocalBodyConfig] = useState<CandleBodyDisplayConfig>(() =>
+    sanitizeCandleBodyConfig(candleBodyDisplay ?? DEFAULT_CANDLE_BODY_CONFIG)
+  );
+  const [showCustomBarRange, setShowCustomBarRange] = useState(false);
+  const [showCustomAvgRange, setShowCustomAvgRange] = useState(false);
+  const [localWickConfig, setLocalWickConfig] = useState<CandleBodyDisplayConfig>(() =>
+    sanitizeCandleBodyConfig(candleWickDisplay ?? DEFAULT_CANDLE_BODY_CONFIG)
+  );
+  const [showCustomWickBarRange, setShowCustomWickBarRange] = useState(false);
+  const [showCustomWickAvgRange, setShowCustomWickAvgRange] = useState(false);
   const dragStateRef = useRef<{ startX: number; startPan: number } | null>(null);
   const pinchStateRef = useRef<{ startDist: number; startZoom: number } | null>(null);
+
+  useEffect(() => {
+    if (candleBodyDisplay) {
+      setLocalBodyConfig(sanitizeCandleBodyConfig(candleBodyDisplay));
+    }
+  }, [candleBodyDisplay]);
+
+  useEffect(() => {
+    if (candleWickDisplay) {
+      setLocalWickConfig(sanitizeCandleBodyConfig(candleWickDisplay));
+    }
+  }, [candleWickDisplay]);
+
+  const activeBodyConfig = candleBodyDisplay
+    ? sanitizeCandleBodyConfig(candleBodyDisplay)
+    : localBodyConfig;
+
+  const updateBodyConfig = (patch: Partial<CandleBodyDisplayConfig>) => {
+    const next = sanitizeCandleBodyConfig({ ...activeBodyConfig, ...patch });
+    setLocalBodyConfig(next);
+    onChangeCandleBodyDisplay?.(next);
+  };
+
+  const bodySummary = useMemo(
+    () =>
+      computeCandleBodyWindowSummary(
+        assetState.candles,
+        activeBodyConfig,
+        assetState.analysis.runLength
+      ),
+    [assetState.candles, activeBodyConfig, assetState.analysis.runLength]
+  );
+
+  const barPresetKey = showCustomBarRange ? 'custom' : getBarPresetKey(activeBodyConfig);
+  const avgPresetKey = showCustomAvgRange ? 'custom' : getAvgPresetKey(activeBodyConfig);
+
+  const activeWickConfig = candleWickDisplay
+    ? sanitizeCandleBodyConfig(candleWickDisplay)
+    : localWickConfig;
+
+  const updateWickConfig = (patch: Partial<CandleBodyDisplayConfig>) => {
+    const next = sanitizeCandleBodyConfig({ ...activeWickConfig, ...patch });
+    setLocalWickConfig(next);
+    onChangeCandleWickDisplay?.(next);
+  };
+
+  const wickSummary = useMemo(
+    () =>
+      computeCandleWickWindowSummary(
+        assetState.candles,
+        activeWickConfig,
+        assetState.analysis.runLength
+      ),
+    [assetState.candles, activeWickConfig, assetState.analysis.runLength]
+  );
+
+  const wickBarPresetKey = showCustomWickBarRange
+    ? 'custom'
+    : getBarPresetKey(activeWickConfig);
+  const wickAvgPresetKey = showCustomWickAvgRange
+    ? 'custom'
+    : getAvgPresetKey(activeWickConfig);
 
   const safeDecimals = Number.isFinite(assetState.asset.decimals)
     ? Math.min(8, Math.max(0, Math.round(assetState.asset.decimals)))
@@ -554,14 +676,49 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
     ]
   );
 
-  const detectedFlowDir: TrendDirection | null =
-    assetState.analysis.direction &&
-    assetState.analysis.patternFeatures &&
-    assetState.analysis.directionalEfficiency >= 0.58
-      ? assetState.analysis.direction
+  const analysisMatchesDir =
+    Boolean(assetState.analysis.patternFeatures) &&
+    Boolean(assetState.analysis.direction) &&
+    assetState.analysis.runLength >= 4 &&
+    assetState.analysis.runLength <= 6 &&
+    assetState.analysis.directionalEfficiency >= 0.45;
+
+  const detectedFlowDir: TrendDirection | null = analysisMatchesDir
+    ? assetState.analysis.direction
+    : flowPreview.ok
+      ? flowPreview.direction
+      : null;
+
+  const lastCandle = assetState.candles[assetState.candles.length - 1];
+  const fallbackDir: TrendDirection =
+    detectedFlowDir ??
+    assetState.analysis.direction ??
+    (lastCandle && lastCandle.close < lastCandle.open ? 'DOWN' : 'UP');
+
+  const displayUniformity = analysisMatchesDir
+    ? assetState.analysis.uniformityScore
+    : flowPreview.ok
+      ? flowPreview.uniformityScore
+      : assetState.analysis.uniformityScore;
+  const displayWickPct = Math.round(
+    (analysisMatchesDir
+      ? assetState.analysis.avgWickRatio
       : flowPreview.ok
-        ? flowPreview.direction
-        : null;
+        ? flowPreview.avgWickRatio
+        : assetState.analysis.avgWickRatio) * 100
+  );
+  const displayBodyRatio = analysisMatchesDir
+    ? assetState.analysis.avgBodyToMedianRatio
+    : flowPreview.ok
+      ? flowPreview.avgBodyToMedianRatio
+      : assetState.analysis.avgBodyToMedianRatio;
+  const displayBodyRangePct = Math.max(0, Math.min(100, 100 - displayWickPct));
+  const displayAlignment =
+    analysisMatchesDir && assetState.analysis.patternFeatures
+      ? computeFeatureAlignmentPct(assetState.analysis.patternFeatures)
+      : flowPreview.ok
+        ? flowPreview.alignmentScore
+        : assetState.analysis.swingScore;
 
   const handleTrainClick = async (
     verdict: PatternVerdict,
@@ -574,8 +731,8 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         type: 'ok',
         text:
           verdict === 'PASS'
-            ? 'บันทึกทรงเทรนด์นี้ลงในอุปกรณ์แล้ว'
-            : 'บันทึกว่าไม่ผ่านลงในอุปกรณ์แล้ว',
+            ? 'บันทึกสเปก 4–6 แท่งล่าสุด ("ผ่าน") แล้ว (AI จำความสม่ำเสมอ·ไส้·การเรียงตัว)'
+            : 'บันทึกว่า "ไม่ผ่าน" แล้ว (AI จะคัดกรองทรงแบบนี้ลงในตาราง)',
       });
     } else if (res.message) {
       setAiFeedbackNotice({ type: 'warn', text: res.message });
@@ -616,6 +773,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               <span className="text-[#CBD5E1]">{formatTime(inspectedCandle.time)}</span>
               <span>O {inspectedCandle.open.toFixed(safeDecimals)}</span>
               <span>C {inspectedCandle.close.toFixed(safeDecimals)}</span>
+              <span className="text-[#60A5FA]">
+                เนื้อ {Math.max(0, 100 - Math.round(inspectedMetrics.wickRatio * 100))}%
+              </span>
               <span
                 className={
                   inspectedMetrics.wickRatio <= 0.25
@@ -674,7 +834,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         <div
           ref={containerRef}
           className={`relative flex-1 min-w-0 bg-[#0D1422] select-none overflow-hidden ${
-            compact ? 'h-[250px] sm:h-[270px]' : 'h-[320px] sm:h-[360px] lg:h-[440px]'
+            compact ? 'h-[230px] sm:h-[250px]' : 'h-[270px] sm:h-[290px] lg:h-[310px]'
           }`}
         >
           {visibleCandles.length === 0 ? (
@@ -727,30 +887,30 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
         {/* Right Info Panel matching user's reference screenshots */}
         <div
           className={`${
-            compact ? 'md:w-[175px]' : 'md:w-[210px]'
-          } border-t md:border-t-0 md:border-l border-[#1A2438] bg-[#0B111E] p-3 sm:p-3.5 flex flex-row md:flex-col justify-between gap-2.5 sm:gap-3 shrink-0 min-w-0`}
+            compact ? 'md:w-[175px]' : 'md:w-[215px]'
+          } border-t md:border-t-0 md:border-l border-[#1A2438] bg-[#0B111E] p-2 sm:p-2.5 flex flex-row md:flex-col justify-between gap-1.5 shrink-0 min-w-0`}
         >
-          <div className="space-y-2 min-w-0 flex-1 md:flex-none">
+          <div className="space-y-1.5 min-w-0 flex-1 md:flex-none">
             <div>
               <div className="text-sm font-bold text-[#F8FAFC] truncate">
                 {assetState.asset.name}
               </div>
-              <div className="text-xs text-[#94A3B8] truncate">
+              <div className="text-[11px] text-[#94A3B8] truncate">
                 {assetState.asset.symbol} · 1 นาที
               </div>
             </div>
 
-            <div className="p-2 sm:p-2.5 rounded-lg bg-[#141D2F] border border-[#1E293B]">
-              <div className="text-[11px] text-[#94A3B8]">หมดอายุ</div>
-              <div className="text-base sm:text-lg font-bold font-mono-tabular text-[#F8FAFC]">
+            <div className="px-2 py-1.5 rounded-lg bg-[#141D2F] border border-[#1E293B]">
+              <div className="text-[10px] text-[#94A3B8]">หมดอายุ</div>
+              <div className="text-sm font-bold font-mono-tabular text-[#F8FAFC] leading-tight">
                 {formatNextMinute(latestClosedTime)}
               </div>
-              <div className="text-[11px] font-mono-tabular text-amber-300 mt-0.5">
+              <div className="text-[10px] font-mono-tabular text-amber-300 mt-0.5">
                 จบแท่งใน {String(assetState.secondsRemaining).padStart(2, '0')} วิ
               </div>
             </div>
 
-            <div className="hidden md:block text-xs space-y-1 text-[#94A3B8]">
+            <div className="hidden md:block text-[11px] space-y-0.5 text-[#94A3B8]">
               <div className="flex justify-between">
                 <span>เข้าเงื่อนไข</span>
                 <span
@@ -770,9 +930,29 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                 </span>
               </div>
               <div className="flex justify-between">
-                <span>ไส้เฉลี่ย</span>
+                <span>ความยาวเนื้อกราฟ</span>
+                <span className="font-mono-tabular text-[#60A5FA]">
+                  {displayBodyRatio > 0 ? `${displayBodyRatio.toFixed(2)}x` : '--'} ({displayBodyRangePct}%)
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>ปริมาณไส้เทียน</span>
                 <span className="font-mono-tabular text-emerald-400">
-                  {(assetState.analysis.avgWickRatio * 100).toFixed(0)}%
+                  {displayWickPct}%
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>แท่งต่างสี</span>
+                <span
+                  className={`font-mono-tabular ${
+                    assetState.analysis.counterCandles > 0
+                      ? 'text-amber-300 font-semibold'
+                      : 'text-[#E2E8F0]'
+                  }`}
+                >
+                  {assetState.analysis.counterCandles > 0
+                    ? `${assetState.analysis.counterCandles} แท่ง`
+                    : '0 (สีเดียว)'}
                 </span>
               </div>
               <div className="flex justify-between">
@@ -799,9 +979,9 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           </div>
 
           {/* Reference CALL/PUT Indicator Card + AI Pattern Training Buttons */}
-          <div className="flex flex-col gap-2 flex-1 min-w-0 sm:flex-none sm:min-w-[140px] md:w-full">
+          <div className="flex flex-col gap-1.5 flex-1 min-w-0 sm:flex-none sm:min-w-[140px] md:w-full">
             <div
-              className={`p-2.5 sm:p-3 rounded-lg flex flex-col items-center justify-center text-center w-full ${
+              className={`px-2.5 py-2 rounded-lg flex flex-col items-center justify-center text-center w-full ${
                 isMatch && dir === 'UP'
                   ? 'bg-[#16C784] text-[#052E16]'
                   : isMatch && dir === 'DOWN'
@@ -861,15 +1041,15 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
               )}
             </div>
 
-            {onTrainAiPattern && assetState.candles.length >= 8 && (
+            {onTrainAiPattern && assetState.candles.length >= 6 && (
               <div
-                className="p-2 rounded-lg bg-[#101829] border border-[#1E293B] space-y-1.5 w-full"
+                className="p-1.5 rounded-lg bg-[#101829] border border-[#1E293B] space-y-1 w-full"
                 onClick={(e) => e.stopPropagation()}
               >
-                <div className="flex items-center justify-between gap-1 text-[10px]">
+                <div className="flex items-center justify-between gap-1 text-[10px] whitespace-nowrap">
                   <span className="inline-flex items-center gap-1 font-semibold text-indigo-300">
                     <Brain className="w-3 h-3 shrink-0" />
-                    <span>สอน AI (เฉพาะขึ้น/ลง)</span>
+                    <span>สอน AI 4–6 แท่ง</span>
                   </span>
                   {detectedFlowDir ? (
                     <span
@@ -879,11 +1059,36 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                           : 'text-rose-400'
                       }`}
                     >
-                      {detectedFlowDir === 'UP' ? 'เทรนด์ขึ้น' : 'เทรนด์ลง'}
+                      {detectedFlowDir === 'UP' ? 'ไหลขึ้น' : 'ไหลลง'}
                     </span>
                   ) : (
-                    <span className="text-amber-300">ไซด์เวย์</span>
+                    <span className="text-amber-300">ยังไม่ชัด</span>
                   )}
+                </div>
+
+                {/* Live 3-pillar traits taught from latest 4-6 candles */}
+                <div
+                  data-testid="ai-three-pillars-preview"
+                  className="grid grid-cols-3 gap-1 text-center"
+                >
+                  <div className="px-1 py-0.5 rounded bg-[#0B111E] border border-[#1E293B]">
+                    <div className="text-[9px] text-[#94A3B8]">สม่ำเสมอ</div>
+                    <div className="text-[11px] font-bold font-mono-tabular text-[#60A5FA]">
+                      {displayUniformity}%
+                    </div>
+                  </div>
+                  <div className="px-1 py-0.5 rounded bg-[#0B111E] border border-[#1E293B]">
+                    <div className="text-[9px] text-[#94A3B8]">ปริมาณไส้</div>
+                    <div className="text-[11px] font-bold font-mono-tabular text-emerald-300">
+                      {displayWickPct}%
+                    </div>
+                  </div>
+                  <div className="px-1 py-0.5 rounded bg-[#0B111E] border border-[#1E293B]">
+                    <div className="text-[9px] text-[#94A3B8]">เรียงตัว</div>
+                    <div className="text-[11px] font-bold font-mono-tabular text-amber-300">
+                      {displayAlignment}%
+                    </div>
+                  </div>
                 </div>
 
                 {detectedFlowDir ? (
@@ -897,7 +1102,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                           ? 'bg-emerald-500/25 border-emerald-400 text-emerald-200'
                           : 'bg-[#14231F] hover:bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
                       }`}
-                      title="สอน AI ว่ากราฟไหลเป็นเทรนด์แบบนี้คือผ่านเงื่อนไข (เก็บในอุปกรณ์)"
+                      title="สอน AI ว่าแท่งไหลขนาดนี้ ความยาวไส้นี้ และความสม่ำเสมอนี้คือผ่าน (เก็บในอุปกรณ์)"
                     >
                       <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
                       <span>
@@ -915,7 +1120,7 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                           ? 'bg-rose-500/25 border-rose-400 text-rose-200'
                           : 'bg-[#141D2F] hover:bg-rose-500/15 border-[#273652] text-[#94A3B8] hover:text-rose-300'
                       }`}
-                      title="บอก AI ว่าทรงแบบนี้ยังไม่ผ่าน"
+                      title="บอก AI ว่าขนาดแท่ง/ไส้/ความสม่ำเสมอแบบนี้ไม่ผ่าน"
                     >
                       <XCircle className="w-3.5 h-3.5 shrink-0" />
                       <span>ไม่ผ่าน</span>
@@ -924,24 +1129,32 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
                 ) : (
                   <div className="space-y-1.5">
                     <div className="text-[10px] leading-snug text-[#94A3B8]">
-                      กราฟนี้ยังไม่เป็นเทรนด์ไหลขึ้น/ลงชัดเจน (AI ไม่รับสอนกราฟไซด์เวย์)
+                      เลือกพิจารณาแท่งไหล: กดสอนผ่าน (ขึ้น/ลง) หรือกดไม่ผ่านเพื่อให้ AI จำไปคัดออก
                     </div>
-                    <div className="grid grid-cols-2 gap-1">
+                    <div className="grid grid-cols-3 gap-1">
                       <button
                         type="button"
                         onClick={() => handleTrainClick('PASS', 'UP')}
-                        aria-label={`สอนเทรนด์ขึ้น · ${assetState.asset.name}`}
-                        className="py-1 px-1.5 rounded bg-[#141D2F] hover:bg-emerald-500/15 border border-[#273652] text-[10px] font-medium text-emerald-300 cursor-pointer whitespace-nowrap"
+                        aria-label={`สอนแท่งไหลขึ้น · ${assetState.asset.name}`}
+                        className="py-1 px-1 rounded bg-[#141D2F] hover:bg-emerald-500/15 border border-[#273652] text-[10px] font-medium text-emerald-300 cursor-pointer whitespace-nowrap"
                       >
-                        สอนเทรนด์ขึ้น
+                        ผ่านขึ้น
                       </button>
                       <button
                         type="button"
                         onClick={() => handleTrainClick('PASS', 'DOWN')}
-                        aria-label={`สอนเทรนด์ลง · ${assetState.asset.name}`}
-                        className="py-1 px-1.5 rounded bg-[#141D2F] hover:bg-rose-500/15 border border-[#273652] text-[10px] font-medium text-rose-300 cursor-pointer whitespace-nowrap"
+                        aria-label={`สอนแท่งไหลลง · ${assetState.asset.name}`}
+                        className="py-1 px-1 rounded bg-[#141D2F] hover:bg-rose-500/15 border border-[#273652] text-[10px] font-medium text-rose-300 cursor-pointer whitespace-nowrap"
                       >
-                        สอนเทรนด์ลง
+                        ผ่านลง
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleTrainClick('REJECT', fallbackDir)}
+                        aria-label={`ไม่ผ่าน ทรงกราฟ ${assetState.asset.name}`}
+                        className="py-1 px-1 rounded bg-[#141D2F] hover:bg-rose-500/15 border border-[#273652] text-[10px] font-medium text-[#CBD5E1] hover:text-rose-300 cursor-pointer whitespace-nowrap"
+                      >
+                        ไม่ผ่าน
                       </button>
                     </div>
                   </div>
@@ -963,6 +1176,636 @@ export const CandlestickChart: React.FC<CandlestickChartProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Live Candle Body Length Window (5-6 bars + real-time last bar + post-close average) */}
+      {assetState.candles.length > 0 && (
+        <div
+          data-testid="candle-body-window"
+          onClick={(e) => e.stopPropagation()}
+          className={`border-t border-[#1A2438] bg-[#0B111E] ${
+            compact ? 'px-2.5 py-1.5 space-y-1.5' : 'px-3.5 py-2 space-y-1.5'
+          }`}
+        >
+          {/* Window Header & User Bar/Average Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <BarChart3 className="w-3.5 h-3.5 text-[#60A5FA] shrink-0" />
+              <span className="text-xs font-semibold text-[#E2E8F0]">
+                ปริมาณความยาวเนื้อเทียนล่าสุด
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-[#141D2F] border border-[#23304A] text-[10px] font-mono-tabular text-[#60A5FA] whitespace-nowrap">
+                {bodySummary.displayLabel}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              {/* Bar Window Selector */}
+              <div className="flex items-center gap-1.5 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 py-1">
+                <label
+                  htmlFor={`body-bars-${assetState.asset.id}`}
+                  className="text-[#94A3B8] whitespace-nowrap"
+                >
+                  แสดง:
+                </label>
+                <select
+                  id={`body-bars-${assetState.asset.id}`}
+                  aria-label="กำหนดจำนวนแท่งแสดงปริมาณเนื้อเทียน"
+                  data-testid="candle-body-bars-select"
+                  value={barPresetKey}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') {
+                      setShowCustomBarRange(true);
+                      return;
+                    }
+                    setShowCustomBarRange(false);
+                    if (v === 'range-2-4') {
+                      updateBodyConfig({ mode: 'RANGE', minBars: 2, maxBars: 4 });
+                    } else if (v === 'range-4-6') {
+                      updateBodyConfig({ mode: 'RANGE', minBars: 4, maxBars: 6 });
+                    } else if (v === 'range-5-6') {
+                      updateBodyConfig({ mode: 'RANGE', minBars: 5, maxBars: 6 });
+                    } else if (v.startsWith('fixed-')) {
+                      const n = Number(v.replace('fixed-', ''));
+                      updateBodyConfig({ mode: 'FIXED', fixedBars: n });
+                    }
+                  }}
+                  className="bg-transparent text-[#F8FAFC] font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="range-5-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5–6 แท่ง (แนะนำ)
+                  </option>
+                  <option value="range-4-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4–6 แท่ง
+                  </option>
+                  <option value="range-2-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    2–4 แท่ง
+                  </option>
+                  <option value="fixed-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-5" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    6 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-7" className="bg-[#0D1422] text-[#F8FAFC]">
+                    7 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-8" className="bg-[#0D1422] text-[#F8FAFC]">
+                    8 แท่ง (ตายตัว)
+                  </option>
+                  <option value="custom" className="bg-[#0D1422] text-[#F8FAFC]">
+                    กำหนดช่วงเอง...
+                  </option>
+                </select>
+              </div>
+
+              {barPresetKey === 'custom' && (
+                <div className="flex items-center gap-1 bg-[#0F172A] border border-[#273652] rounded-lg px-2 py-0.5 font-mono-tabular">
+                  <input
+                    type="number"
+                    min={2}
+                    max={8}
+                    aria-label="จำนวนแท่งต่ำสุด"
+                    value={activeBodyConfig.minBars}
+                    onChange={(e) => {
+                      const minV = Math.min(8, Math.max(2, Number(e.target.value) || 2));
+                      updateBodyConfig({
+                        mode: 'RANGE',
+                        minBars: minV,
+                        maxBars: Math.max(minV, activeBodyConfig.maxBars),
+                      });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-[#F8FAFC]"
+                  />
+                  <span className="text-[#64748B]">–</span>
+                  <input
+                    type="number"
+                    min={2}
+                    max={10}
+                    aria-label="จำนวนแท่งสูงสุด"
+                    value={activeBodyConfig.maxBars}
+                    onChange={(e) => {
+                      const maxV = Math.min(
+                        10,
+                        Math.max(activeBodyConfig.minBars, Number(e.target.value) || activeBodyConfig.minBars)
+                      );
+                      updateBodyConfig({ mode: 'RANGE', maxBars: maxV });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-[#F8FAFC]"
+                  />
+                </div>
+              )}
+
+              {/* Closed-Bar Average Window Selector */}
+              <div className="flex items-center gap-1.5 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 py-1">
+                <label
+                  htmlFor={`body-avg-${assetState.asset.id}`}
+                  className="text-[#94A3B8] whitespace-nowrap"
+                >
+                  เฉลี่ยรวม:
+                </label>
+                <select
+                  id={`body-avg-${assetState.asset.id}`}
+                  aria-label="กำหนดจำนวนแท่งสำหรับคำนวณค่าเฉลี่ยรวม"
+                  data-testid="candle-body-avg-select"
+                  value={avgPresetKey}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') {
+                      setShowCustomAvgRange(true);
+                      return;
+                    }
+                    setShowCustomAvgRange(false);
+                    if (v === 'sync') {
+                      updateBodyConfig({ avgMode: 'SYNC' });
+                    } else if (v === 'range-2-4') {
+                      updateBodyConfig({ avgMode: 'RANGE', avgMinBars: 2, avgMaxBars: 4 });
+                    } else if (v === 'range-4-6') {
+                      updateBodyConfig({ avgMode: 'RANGE', avgMinBars: 4, avgMaxBars: 6 });
+                    } else if (v === 'range-5-6') {
+                      updateBodyConfig({ avgMode: 'RANGE', avgMinBars: 5, avgMaxBars: 6 });
+                    } else if (v.startsWith('fixed-')) {
+                      const n = Number(v.replace('fixed-', ''));
+                      updateBodyConfig({ avgMode: 'FIXED', avgFixedBars: n });
+                    }
+                  }}
+                  className="bg-transparent text-emerald-300 font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="sync" className="bg-[#0D1422] text-[#F8FAFC]">
+                    ตามแท่งที่เลือก
+                  </option>
+                  <option value="range-5-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5–6 แท่งจบ
+                  </option>
+                  <option value="range-4-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4–6 แท่งจบ
+                  </option>
+                  <option value="range-2-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    2–4 แท่งจบ
+                  </option>
+                  <option value="fixed-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-5" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    6 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-7" className="bg-[#0D1422] text-[#F8FAFC]">
+                    7 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-8" className="bg-[#0D1422] text-[#F8FAFC]">
+                    8 แท่ง (ตายตัว)
+                  </option>
+                  <option value="custom" className="bg-[#0D1422] text-[#F8FAFC]">
+                    กำหนดเอง...
+                  </option>
+                </select>
+              </div>
+
+              {avgPresetKey === 'custom' && (
+                <div className="flex items-center gap-1 bg-[#0F172A] border border-[#273652] rounded-lg px-2 py-0.5 font-mono-tabular">
+                  <input
+                    type="number"
+                    min={2}
+                    max={10}
+                    aria-label="จำนวนแท่งเฉลี่ยรวม"
+                    value={activeBodyConfig.avgFixedBars}
+                    onChange={(e) => {
+                      const n = Math.min(10, Math.max(2, Number(e.target.value) || 5));
+                      updateBodyConfig({ avgMode: 'FIXED', avgFixedBars: n });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-emerald-300"
+                  />
+                  <span className="text-[10px] text-[#94A3B8]">แท่ง</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Candle Body Cards + Closed-Bar Average Summary Card */}
+          <div className="flex flex-col sm:flex-row items-stretch gap-2">
+            <div
+              data-testid="candle-body-bars-grid"
+              className="flex-1 grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-1.5"
+            >
+              {bodySummary.bars.map((bar) => {
+                const gaugePct = Math.min(100, Math.max(6, Math.round((bar.bodyToMedianRatio / 1.6) * 100)));
+                const ratioColor =
+                  bar.direction === 'UP'
+                    ? 'text-[#16C784]'
+                    : bar.direction === 'DOWN'
+                      ? 'text-[#F45B69]'
+                      : 'text-[#94A3B8]';
+                const gaugeColor =
+                  bar.direction === 'UP'
+                    ? 'bg-[#16C784]'
+                    : bar.direction === 'DOWN'
+                      ? 'bg-[#F45B69]'
+                      : 'bg-[#64748B]';
+
+                return (
+                  <div
+                    key={`${bar.time}-${bar.index}`}
+                    data-testid={`candle-body-bar-${bar.index}`}
+                    data-live={bar.isLive ? 'true' : 'false'}
+                    className={`rounded-lg px-2 py-1.5 border flex flex-col justify-between gap-1 ${
+                      bar.isLive
+                        ? 'bg-[#121D33] border-[#3B82F6]/60'
+                        : 'bg-[#0F172A] border-[#1E293B]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-[10px]">
+                      <span className="text-[#CBD5E1] font-medium whitespace-nowrap">
+                        แท่งที่ {bar.index}
+                      </span>
+                      {bar.isLive ? (
+                        <span className="inline-flex items-center gap-1 text-[#60A5FA] font-semibold whitespace-nowrap">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#60A5FA] animate-pulse" />
+                          <span>สด</span>
+                        </span>
+                      ) : (
+                        <span className="font-mono-tabular text-[#64748B]">
+                          {formatTime(bar.time)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-baseline justify-between gap-1">
+                      <span className={`font-mono-tabular font-bold text-sm ${ratioColor}`}>
+                        {bar.bodyToMedianRatio.toFixed(2)}×
+                      </span>
+                      <span className="font-mono-tabular text-[10px] text-[#94A3B8]">
+                        {bar.bodyRangePct}%
+                      </span>
+                    </div>
+
+                    <div className="h-1 w-full rounded-full bg-[#090E1A] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-200 ${gaugeColor}`}
+                        style={{ width: `${gaugePct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Closed-Bar Overall Average Card */}
+            <div
+              data-testid="candle-body-average-card"
+              className="sm:w-[195px] shrink-0 rounded-lg px-3 py-2 bg-[#111B30] border border-[#273B63] flex flex-col justify-between gap-1"
+            >
+              <div className="flex items-center justify-between gap-1 text-[10px]">
+                <span className="font-semibold text-[#CBD5E1]">ค่าเฉลี่ยรวม</span>
+                <span className="text-[#60A5FA] font-medium whitespace-nowrap">
+                  {bodySummary.average.barCount} แท่งจบ
+                </span>
+              </div>
+
+              <div className="flex items-baseline justify-between gap-2">
+                <span
+                  data-testid="candle-body-average-value"
+                  className="font-mono-tabular text-lg font-bold text-[#60A5FA]"
+                >
+                  {bodySummary.average.avgBodyToMedianRatio.toFixed(2)}×
+                </span>
+                <span className="font-mono-tabular text-xs font-medium text-emerald-300">
+                  เนื้อ {bodySummary.average.avgBodyRangePct}%
+                </span>
+              </div>
+
+              <div className="text-[10px] text-[#94A3B8] truncate">
+                อัปเดตหลังจบแท่ง ·{' '}
+                <span className="font-mono-tabular text-[#CBD5E1]">
+                  {bodySummary.average.lastClosedTime
+                    ? formatTime(bodySummary.average.lastClosedTime)
+                    : '--:--'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Live Candle Wick Volume Window (same layout as body window, independent controls) */}
+      {assetState.candles.length > 0 && (
+        <div
+          data-testid="candle-wick-window"
+          onClick={(e) => e.stopPropagation()}
+          className={`border-t border-[#1A2438] bg-[#0B111E] ${
+            compact ? 'px-2.5 py-1.5 space-y-1.5' : 'px-3.5 py-2 space-y-1.5'
+          }`}
+        >
+          {/* Window Header & User Bar/Average Controls */}
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <BarChart3 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span className="text-xs font-semibold text-[#E2E8F0]">
+                ปริมาณความยาวไส้เทียนล่าสุด
+              </span>
+              <span className="px-1.5 py-0.5 rounded bg-[#141D2F] border border-[#23304A] text-[10px] font-mono-tabular text-emerald-300 whitespace-nowrap">
+                {wickSummary.displayLabel}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              {/* Bar Window Selector */}
+              <div className="flex items-center gap-1.5 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 py-1">
+                <label
+                  htmlFor={`wick-bars-${assetState.asset.id}`}
+                  className="text-[#94A3B8] whitespace-nowrap"
+                >
+                  แสดง:
+                </label>
+                <select
+                  id={`wick-bars-${assetState.asset.id}`}
+                  aria-label="กำหนดจำนวนแท่งแสดงปริมาณไส้เทียน"
+                  data-testid="candle-wick-bars-select"
+                  value={wickBarPresetKey}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') {
+                      setShowCustomWickBarRange(true);
+                      return;
+                    }
+                    setShowCustomWickBarRange(false);
+                    if (v === 'range-2-4') {
+                      updateWickConfig({ mode: 'RANGE', minBars: 2, maxBars: 4 });
+                    } else if (v === 'range-4-6') {
+                      updateWickConfig({ mode: 'RANGE', minBars: 4, maxBars: 6 });
+                    } else if (v === 'range-5-6') {
+                      updateWickConfig({ mode: 'RANGE', minBars: 5, maxBars: 6 });
+                    } else if (v.startsWith('fixed-')) {
+                      const n = Number(v.replace('fixed-', ''));
+                      updateWickConfig({ mode: 'FIXED', fixedBars: n });
+                    }
+                  }}
+                  className="bg-transparent text-[#F8FAFC] font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="range-5-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5–6 แท่ง (แนะนำ)
+                  </option>
+                  <option value="range-4-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4–6 แท่ง
+                  </option>
+                  <option value="range-2-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    2–4 แท่ง
+                  </option>
+                  <option value="fixed-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-5" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    6 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-7" className="bg-[#0D1422] text-[#F8FAFC]">
+                    7 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-8" className="bg-[#0D1422] text-[#F8FAFC]">
+                    8 แท่ง (ตายตัว)
+                  </option>
+                  <option value="custom" className="bg-[#0D1422] text-[#F8FAFC]">
+                    กำหนดช่วงเอง...
+                  </option>
+                </select>
+              </div>
+
+              {wickBarPresetKey === 'custom' && (
+                <div className="flex items-center gap-1 bg-[#0F172A] border border-[#273652] rounded-lg px-2 py-0.5 font-mono-tabular">
+                  <input
+                    type="number"
+                    min={2}
+                    max={8}
+                    aria-label="จำนวนแท่งไส้เทียนต่ำสุด"
+                    value={activeWickConfig.minBars}
+                    onChange={(e) => {
+                      const minV = Math.min(8, Math.max(2, Number(e.target.value) || 2));
+                      updateWickConfig({
+                        mode: 'RANGE',
+                        minBars: minV,
+                        maxBars: Math.max(minV, activeWickConfig.maxBars),
+                      });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-[#F8FAFC]"
+                  />
+                  <span className="text-[#64748B]">–</span>
+                  <input
+                    type="number"
+                    min={2}
+                    max={10}
+                    aria-label="จำนวนแท่งไส้เทียนสูงสุด"
+                    value={activeWickConfig.maxBars}
+                    onChange={(e) => {
+                      const maxV = Math.min(
+                        10,
+                        Math.max(activeWickConfig.minBars, Number(e.target.value) || activeWickConfig.minBars)
+                      );
+                      updateWickConfig({ mode: 'RANGE', maxBars: maxV });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-[#F8FAFC]"
+                  />
+                </div>
+              )}
+
+              {/* Closed-Bar Average Window Selector */}
+              <div className="flex items-center gap-1.5 bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 py-1">
+                <label
+                  htmlFor={`wick-avg-${assetState.asset.id}`}
+                  className="text-[#94A3B8] whitespace-nowrap"
+                >
+                  เฉลี่ยรวม:
+                </label>
+                <select
+                  id={`wick-avg-${assetState.asset.id}`}
+                  aria-label="กำหนดจำนวนแท่งสำหรับคำนวณค่าเฉลี่ยรวมไส้เทียน"
+                  data-testid="candle-wick-avg-select"
+                  value={wickAvgPresetKey}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === 'custom') {
+                      setShowCustomWickAvgRange(true);
+                      return;
+                    }
+                    setShowCustomWickAvgRange(false);
+                    if (v === 'sync') {
+                      updateWickConfig({ avgMode: 'SYNC' });
+                    } else if (v === 'range-2-4') {
+                      updateWickConfig({ avgMode: 'RANGE', avgMinBars: 2, avgMaxBars: 4 });
+                    } else if (v === 'range-4-6') {
+                      updateWickConfig({ avgMode: 'RANGE', avgMinBars: 4, avgMaxBars: 6 });
+                    } else if (v === 'range-5-6') {
+                      updateWickConfig({ avgMode: 'RANGE', avgMinBars: 5, avgMaxBars: 6 });
+                    } else if (v.startsWith('fixed-')) {
+                      const n = Number(v.replace('fixed-', ''));
+                      updateWickConfig({ avgMode: 'FIXED', avgFixedBars: n });
+                    }
+                  }}
+                  className="bg-transparent text-emerald-300 font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="sync" className="bg-[#0D1422] text-[#F8FAFC]">
+                    ตามแท่งที่เลือก
+                  </option>
+                  <option value="range-5-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5–6 แท่งจบ
+                  </option>
+                  <option value="range-4-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4–6 แท่งจบ
+                  </option>
+                  <option value="range-2-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    2–4 แท่งจบ
+                  </option>
+                  <option value="fixed-4" className="bg-[#0D1422] text-[#F8FAFC]">
+                    4 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-5" className="bg-[#0D1422] text-[#F8FAFC]">
+                    5 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-6" className="bg-[#0D1422] text-[#F8FAFC]">
+                    6 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-7" className="bg-[#0D1422] text-[#F8FAFC]">
+                    7 แท่ง (ตายตัว)
+                  </option>
+                  <option value="fixed-8" className="bg-[#0D1422] text-[#F8FAFC]">
+                    8 แท่ง (ตายตัว)
+                  </option>
+                  <option value="custom" className="bg-[#0D1422] text-[#F8FAFC]">
+                    กำหนดเอง...
+                  </option>
+                </select>
+              </div>
+
+              {wickAvgPresetKey === 'custom' && (
+                <div className="flex items-center gap-1 bg-[#0F172A] border border-[#273652] rounded-lg px-2 py-0.5 font-mono-tabular">
+                  <input
+                    type="number"
+                    min={2}
+                    max={10}
+                    aria-label="จำนวนแท่งเฉลี่ยรวมไส้เทียน"
+                    value={activeWickConfig.avgFixedBars}
+                    onChange={(e) => {
+                      const n = Math.min(10, Math.max(2, Number(e.target.value) || 5));
+                      updateWickConfig({ avgMode: 'FIXED', avgFixedBars: n });
+                    }}
+                    className="w-10 bg-[#0B111E] border border-[#1E293B] rounded px-1 py-0.5 text-center text-emerald-300"
+                  />
+                  <span className="text-[10px] text-[#94A3B8]">แท่ง</span>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Candle Wick Cards + Closed-Bar Average Summary Card */}
+          <div className="flex flex-col sm:flex-row items-stretch gap-2">
+            <div
+              data-testid="candle-wick-bars-grid"
+              className="flex-1 grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 xl:grid-cols-8 gap-1.5"
+            >
+              {wickSummary.bars.map((bar) => {
+                const gaugePct = Math.min(100, Math.max(6, bar.wickRangePct));
+                const ratioColor =
+                  bar.wickRangePct <= 25
+                    ? 'text-emerald-400'
+                    : bar.wickRangePct <= 45
+                      ? 'text-amber-400'
+                      : 'text-[#F45B69]';
+                const gaugeColor =
+                  bar.wickRangePct <= 25
+                    ? 'bg-emerald-400'
+                    : bar.wickRangePct <= 45
+                      ? 'bg-amber-400'
+                      : 'bg-[#F45B69]';
+
+                return (
+                  <div
+                    key={`${bar.time}-${bar.index}`}
+                    data-testid={`candle-wick-bar-${bar.index}`}
+                    data-live={bar.isLive ? 'true' : 'false'}
+                    className={`rounded-lg px-2 py-1.5 border flex flex-col justify-between gap-1 ${
+                      bar.isLive
+                        ? 'bg-[#121D33] border-[#3B82F6]/60'
+                        : 'bg-[#0F172A] border-[#1E293B]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-1 text-[10px]">
+                      <span className="text-[#CBD5E1] font-medium whitespace-nowrap">
+                        แท่งที่ {bar.index}
+                      </span>
+                      {bar.isLive ? (
+                        <span className="inline-flex items-center gap-1 text-[#60A5FA] font-semibold whitespace-nowrap">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#60A5FA] animate-pulse" />
+                          <span>สด</span>
+                        </span>
+                      ) : (
+                        <span className="font-mono-tabular text-[#64748B]">
+                          {formatTime(bar.time)}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-baseline justify-between gap-1">
+                      <span className={`font-mono-tabular font-bold text-sm ${ratioColor}`}>
+                        {bar.wickToMedianRatio.toFixed(2)}×
+                      </span>
+                      <span className="font-mono-tabular text-[10px] text-[#94A3B8]">
+                        {bar.wickRangePct}%
+                      </span>
+                    </div>
+
+                    <div className="h-1 w-full rounded-full bg-[#090E1A] overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-200 ${gaugeColor}`}
+                        style={{ width: `${gaugePct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Closed-Bar Overall Average Card */}
+            <div
+              data-testid="candle-wick-average-card"
+              className="sm:w-[195px] shrink-0 rounded-lg px-3 py-2 bg-[#111B30] border border-[#273B63] flex flex-col justify-between gap-1"
+            >
+              <div className="flex items-center justify-between gap-1 text-[10px]">
+                <span className="font-semibold text-[#CBD5E1]">ค่าเฉลี่ยรวม</span>
+                <span className="text-emerald-300 font-medium whitespace-nowrap">
+                  {wickSummary.average.barCount} แท่งจบ
+                </span>
+              </div>
+
+              <div className="flex items-baseline justify-between gap-2">
+                <span
+                  data-testid="candle-wick-average-value"
+                  className="font-mono-tabular text-lg font-bold text-emerald-400"
+                >
+                  {wickSummary.average.avgWickToMedianRatio.toFixed(2)}×
+                </span>
+                <span className="font-mono-tabular text-xs font-medium text-[#CBD5E1]">
+                  ไส้ {wickSummary.average.avgWickRangePct}%
+                </span>
+              </div>
+
+              <div className="text-[10px] text-[#94A3B8] truncate">
+                อัปเดตหลังจบแท่ง ·{' '}
+                <span className="font-mono-tabular text-[#CBD5E1]">
+                  {wickSummary.average.lastClosedTime
+                    ? formatTime(wickSummary.average.lastClosedTime)
+                    : '--:--'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

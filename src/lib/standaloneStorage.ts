@@ -1,3 +1,4 @@
+import { sanitizeCandleBodyConfig } from './candleBodyStats';
 import { deduplicateAlertsByAsset } from './performanceStats';
 import {
   DEFAULT_SCANNER_CONFIG,
@@ -26,10 +27,17 @@ export function loadSavedConfig(): ScannerConfig {
     const scanWindowBars = Number.isFinite(rawWindow)
       ? Math.min(20, Math.max(15, Math.round(rawWindow)))
       : DEFAULT_SCANNER_CONFIG.scanWindowBars;
+    const rawRefresh = Number(parsed.rankRefreshIntervalSec);
+    const rankRefreshIntervalSec = Number.isFinite(rawRefresh)
+      ? Math.min(60, Math.max(30, Math.round(rawRefresh)))
+      : DEFAULT_SCANNER_CONFIG.rankRefreshIntervalSec;
     return {
       ...DEFAULT_SCANNER_CONFIG,
       ...parsed,
       scanWindowBars,
+      rankRefreshIntervalSec,
+      candleBodyDisplay: sanitizeCandleBodyConfig(parsed.candleBodyDisplay),
+      candleWickDisplay: sanitizeCandleBodyConfig(parsed.candleWickDisplay),
     };
   } catch {
     return { ...DEFAULT_SCANNER_CONFIG };

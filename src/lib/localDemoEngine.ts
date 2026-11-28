@@ -81,6 +81,36 @@ function buildLocalCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
       } else {
         delta = (i % 2 === 0 ? -1 : 1) * step * (0.85 + pseudoRand(i) * 0.3);
       }
+    } else if (!isFormingBar && seed.initialPattern === 'PULLBACK_UP') {
+      // 5 closed bars: 2 UP -> 1 small pullback DOWN -> 2 UP (total 5 bars, 1 counter bar)
+      if (closedIdxFromEnd === 0 || closedIdxFromEnd === 1 || closedIdxFromEnd === 3 || closedIdxFromEnd === 4) {
+        delta = step * (0.88 + pseudoRand(i) * 0.2);
+        upperWick = step * (0.07 + pseudoRand(i + 1) * 0.06);
+        lowerWick = step * (0.05 + pseudoRand(i + 2) * 0.05);
+      } else if (closedIdxFromEnd === 2) {
+        delta = -step * 0.42;
+        upperWick = step * 0.05;
+        lowerWick = step * 0.06;
+      } else if (closedIdxFromEnd === 5) {
+        delta = -step * 1.05;
+      } else {
+        delta = (i % 2 === 0 ? 1 : -1) * step * (0.8 + pseudoRand(i) * 0.35);
+      }
+    } else if (!isFormingBar && seed.initialPattern === 'PULLBACK_DOWN') {
+      // 6 closed bars: 2 DOWN -> 2 small pullback UP -> 2 DOWN (total 6 bars, 2 counter bars)
+      if (closedIdxFromEnd === 0 || closedIdxFromEnd === 1 || closedIdxFromEnd === 4 || closedIdxFromEnd === 5) {
+        delta = -step * (0.9 + pseudoRand(i) * 0.2);
+        upperWick = step * (0.05 + pseudoRand(i + 1) * 0.05);
+        lowerWick = step * (0.07 + pseudoRand(i + 2) * 0.06);
+      } else if (closedIdxFromEnd === 2 || closedIdxFromEnd === 3) {
+        delta = step * 0.36;
+        upperWick = step * 0.05;
+        lowerWick = step * 0.05;
+      } else if (closedIdxFromEnd === 6) {
+        delta = step * 1.02;
+      } else {
+        delta = (i % 2 === 0 ? -1 : 1) * step * (0.8 + pseudoRand(i) * 0.35);
+      }
     } else if (!isFormingBar && seed.initialPattern === 'BIG_WICKS') {
       const sign = closedIdxFromEnd <= 4 ? 1 : i % 2 === 0 ? 1 : -1;
       delta = sign * step * (0.8 + pseudoRand(i) * 0.3);
@@ -90,9 +120,13 @@ function buildLocalCandles(seed: CatalogSeedAsset, nowSec: number): Candle[] {
       delta = (pseudoRand(i) > 0.48 ? 1 : -1) * step * (0.7 + pseudoRand(i + 2) * 0.7);
     } else {
       delta =
-        seed.initialPattern === 'DOWN_FLOW' || seed.initialPattern === 'FORMING_DOWN'
+        seed.initialPattern === 'DOWN_FLOW' ||
+        seed.initialPattern === 'FORMING_DOWN' ||
+        seed.initialPattern === 'PULLBACK_DOWN'
           ? -step * 0.38
-          : seed.initialPattern === 'UP_FLOW' || seed.initialPattern === 'FORMING_UP'
+          : seed.initialPattern === 'UP_FLOW' ||
+              seed.initialPattern === 'FORMING_UP' ||
+              seed.initialPattern === 'PULLBACK_UP'
             ? step * 0.38
             : (pseudoRand(i) > 0.5 ? 1 : -1) * step * 0.25;
       upperWick = step * 0.04;
@@ -157,9 +191,13 @@ export class LocalDemoScanner {
       this.candlesByAsset.set(seed.id, buildLocalCandles(seed, nowSec));
       this.regimes.set(seed.id, {
         mode:
-          seed.initialPattern === 'FORMING_UP' || seed.initialPattern === 'UP_FLOW'
+          seed.initialPattern === 'FORMING_UP' ||
+          seed.initialPattern === 'UP_FLOW' ||
+          seed.initialPattern === 'PULLBACK_UP'
             ? 'FLOW_UP'
-            : seed.initialPattern === 'FORMING_DOWN' || seed.initialPattern === 'DOWN_FLOW'
+            : seed.initialPattern === 'FORMING_DOWN' ||
+                seed.initialPattern === 'DOWN_FLOW' ||
+                seed.initialPattern === 'PULLBACK_DOWN'
               ? 'FLOW_DOWN'
               : 'CHOP',
         remainingBars: 2,

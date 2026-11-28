@@ -16,7 +16,6 @@ import {
 } from '../lib/standaloneStorage';
 import { ConnectionMode, ScannerConfig } from '../lib/types';
 import { checkServerHealth, postJsonWithRetry, ServerHealthStatus } from '../utils/apiClient';
-import { unlockAudioContext } from '../utils/soundAlert';
 import { DownloadInstallModal } from './DownloadInstallModal';
 import { OfflineIndicator, PWAInstallButton } from './PWAInstallButton';
 
@@ -108,7 +107,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
     e.preventDefault();
     setError(null);
     setStandalonePrompt(false);
-    unlockAudioContext();
 
     if (requires2FA) {
       if (twoFactorCode.trim().length < 4) {
@@ -214,7 +212,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
   const handleStartDemo = async () => {
     setError(null);
     setStandalonePrompt(false);
-    unlockAudioContext();
 
     if (isFileOrPortable || serverStatus !== 'ready') {
       startLocalDemoFallback();
@@ -252,7 +249,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
               </h1>
               <p className="mt-3 text-sm leading-relaxed text-[#94A3B8]">
                 สแกนคู่สินทรัพย์ Binary และ Digital บน IQ Option พร้อมกันทั้งหมด (ทั้งตลาด OTC และตลาดปกติ)
-                เพื่อตรวจจับเทรนด์ไหลต่อเนื่อง 4–6 แท่งล่าสุด แท่งเล็กสม่ำเสมอ สีเดียวกัน ไม่สวิง และแจ้งเตือนแบบเรียลไทม์ทันที
+                เพื่อจัดอันดับตารางกราฟเทรนด์ไหลต่อเนื่อง 4–6 แท่งล่าสุด แท่งสม่ำเสมอ พร้อมแยกตารางกราฟสีเดียวและกราฟแท่งต่างสีพักตัว 1–2 แท่งอัปเดตหลังจบแท่ง
               </p>
             </div>
 
@@ -264,25 +261,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onAuthenticated }) => 
                 <li className="flex items-start justify-between gap-4 border-b border-[#141D2F] pb-2.5">
                   <span>ความยาวเทรนด์ไหล</span>
                   <span className="text-[#E2E8F0] font-medium text-right">
-                    4–6 แท่งล่าสุด (แท่งเล็ก สีเดียวกัน ไม่สวิง)
+                    4–6 แท่งล่าสุด (แยกตารางสีเดียว / พักตัว 1–2 แท่ง)
                   </span>
                 </li>
                 <li className="flex items-start justify-between gap-4 border-b border-[#141D2F] pb-2.5">
                   <span>ความเร็วการสแกน</span>
                   <span className="text-[#E2E8F0] font-medium text-right">
-                    สแกนพร้อมกันทุกคู่ 1 นาที (OTC + ปกติ)
+                    อัปเดตตารางอันดับหลังจบแท่ง 1 นาที
                   </span>
                 </li>
                 <li className="flex items-start justify-between gap-4 border-b border-[#141D2F] pb-2.5">
                   <span>มุมมองกราฟ</span>
                   <span className="text-[#E2E8F0] font-medium text-right">
-                    ดูพร้อมกันได้ 1–4 กราฟ + ซูมเข้า-ออกได้
+                    ดูพร้อมกันได้ 1–4 กราฟ + แสดงเนื้อกราฟ/ไส้เทียน
                   </span>
                 </li>
                 <li className="flex items-start justify-between gap-4">
                   <span>ลักษณะการทำงาน</span>
                   <span className="text-[#16C784] font-medium text-right">
-                    แจ้งเตือนอย่างเดียว ผู้ใช้กดเทรดเอง
+                    เรียงอันดับตารางกราฟไหล ผู้ใช้กดเทรดเอง
                   </span>
                 </li>
               </ul>

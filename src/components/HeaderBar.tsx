@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react';
 
-export type ActiveTab = 'scanner' | 'alerts' | 'settings';
+export type ActiveTab = 'scanner' | 'settings';
 
 interface HeaderBarProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
-  unacknowledgedCount: number;
   onLogout: () => void;
 }
 
@@ -21,7 +20,6 @@ function formatClock(d: Date): string {
 export const HeaderBar: React.FC<HeaderBarProps> = ({
   activeTab,
   onSelectTab,
-  unacknowledgedCount,
   onLogout,
 }) => {
   const [clockText, setClockText] = useState(() => formatClock(new Date()));
@@ -68,18 +66,6 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
             }`}
           >
             ตัวสแกนสด 1 นาที
-          </button>
-          <button
-            type="button"
-            onClick={() => onSelectTab('alerts')}
-            className={`py-2 md:py-4 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              activeTab === 'alerts'
-                ? 'border-[#3B82F6] text-[#F8FAFC]'
-                : 'border-transparent text-[#94A3B8] hover:text-[#E2E8F0]'
-            }`}
-          >
-            ประวัติแจ้งเตือน
-            {unacknowledgedCount > 0 ? ` (${unacknowledgedCount})` : ''}
           </button>
           <button
             type="button"

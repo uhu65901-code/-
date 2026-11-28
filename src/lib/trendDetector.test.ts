@@ -125,17 +125,23 @@ test('detects clean 4-candle short low-wick uptrend as MATCH under default 4-6 c
     p = close;
   }
 
-  const resDefault = analyzeCandleTrend(candles, DEFAULT_SCANNER_CONFIG);
+  const resDefault = analyzeCandleTrend(candles, DEFAULT_SCANNER_CONFIG, {
+    includeLastCandle: true,
+  });
   assert.equal(resDefault.status, 'MATCH');
   assert.equal(resDefault.direction, 'UP');
   assert.equal(resDefault.runLength, 4);
 
   // When user chooses 5-candle lookback, 4 candles is FORMING until 5th candle arrives
-  const resFive = analyzeCandleTrend(candles, {
-    ...DEFAULT_SCANNER_CONFIG,
-    targetMinCandles: 5,
-    targetMaxCandles: 6,
-  });
+  const resFive = analyzeCandleTrend(
+    candles,
+    {
+      ...DEFAULT_SCANNER_CONFIG,
+      targetMinCandles: 5,
+      targetMaxCandles: 6,
+    },
+    { includeLastCandle: true }
+  );
   assert.equal(resFive.status, 'FORMING');
   assert.equal(resFive.runLength, 4);
 });
@@ -211,7 +217,9 @@ test('rejects oversized swing candles that violate small-candle criterion', () =
     p = close;
   }
 
-  const res = analyzeCandleTrend(candles, DEFAULT_SCANNER_CONFIG);
+  const res = analyzeCandleTrend(candles, DEFAULT_SCANNER_CONFIG, {
+    includeLastCandle: true,
+  });
   assert.equal(res.status, 'NONE');
 });
 
@@ -360,9 +368,10 @@ test('rejects sideways consolidation inside prior choppy range even with same-co
   assert.equal(res.status, 'NONE');
 });
 
-test('enforces balanced minMatchScore 86, same-color default, and small-wick acceptance', () => {
+test('enforces balanced minMatchScore 86, 1-2 pullback allowance in 5-6 bars, and candle-close default', () => {
   assert.equal(DEFAULT_SCANNER_CONFIG.minMatchScore, 86);
-  assert.equal(DEFAULT_SCANNER_CONFIG.maxCounterCandles, 0);
+  assert.equal(DEFAULT_SCANNER_CONFIG.maxCounterCandles, 2);
+  assert.equal(DEFAULT_SCANNER_CONFIG.realtimeAlertImmediate, false);
 
   const candles: Candle[] = [];
   for (let i = 0; i < 16; i++) {
@@ -408,7 +417,7 @@ test('enforces balanced minMatchScore 86, same-color default, and small-wick acc
   assert.equal(strictRes.status, 'NONE');
 });
 
-test('strictly rejects counter-color interruption under default maxCounterCandles=0', () => {
+test('strictly rejects counter-color interruption when maxCounterCandles=0', () => {
   const candles: Candle[] = [];
   for (let i = 0; i < 16; i++) {
     const o = i % 2 === 0 ? 1.1 : 1.101;
@@ -436,10 +445,72 @@ test('strictly rejects counter-color interruption under default maxCounterCandle
     p = close;
   });
 
-  const res = analyzeCandleTrend(candles, DEFAULT_SCANNER_CONFIG, {
+  const res = analyzeCandleTrend(
+    candles,
+    { ...DEFAULT_SCANNER_CONFIG, maxCounterCandles: 0 },
+    { includeLastCandle: true }
+  );
+  assert.notEqual(res.status, 'MATCH');
+});
+
+test('allows 2 small counter-color pullback bars in a 6-bar trend under default config, while rejecting 3+', () => {
+  const makeFlow = (deltas: number[]): Candle[] => {
+    const out: Candle[] = [];
+    for (let i = 0; i < 14; i++) {
+      const o = i % 2 === 0 ? 1.1 : 1.101;
+      const c = i % 2 === 0 ? 1.101 : 1.1;
+      out.push({
+        time: 1700000000 + i * 60,
+        open: o,
+        close: c,
+        high: Math.max(o, c) + 0.00018,
+        low: Math.min(o, c) - 0.00018,
+      });
+    }
+    let p = 1.1;
+    deltas.forEach((d, idx) => {
+      const open = p;
+      const close = open + d;
+      out.push({
+        time: 1700000000 + (14 + idx) * 60,
+        open,
+        close,
+        high: Math.max(open, close) + 0.00005,
+        low: Math.min(open, close) - 0.00005,
+      });
+      p = close;
+    });
+    return out;
+  };
+
+  // 6-bar UP trend with 2 small red pullback bars (bars 1 & 4)
+  const sixBarTwoPullbacks = makeFlow([0.001, -0.00025, 0.001, 0.001, -0.00025, 0.001]);
+  const res2 = analyzeCandleTrend(sixBarTwoPullbacks, DEFAULT_SCANNER_CONFIG, {
     includeLastCandle: true,
   });
-  assert.notEqual(res.status, 'MATCH');
+  assert.equal(res2.status, 'MATCH');
+  assert.equal(res2.direction, 'UP');
+  assert.equal(res2.runLength, 6);
+  assert.equal(res2.counterCandles, 2);
+  assert.ok(res2.avgBodyToMedianRatio > 0);
+  assert.ok(res2.avgWickRatio > 0);
+
+  // 6-bar series with 3 counter-color bars must NOT match the full 6 bars (cuts off at 3rd counter)
+  const sixBarThreeCounters = makeFlow([0.001, -0.00025, -0.00025, 0.001, -0.00025, 0.001]);
+  const res3 = analyzeCandleTrend(sixBarThreeCounters, DEFAULT_SCANNER_CONFIG, {
+    includeLastCandle: true,
+  });
+  assert.notEqual(res3.counterCandles, 3);
+  assert.ok(res3.counterCandles <= 2);
+
+  // When a 6-bar pullback wave is preceded by an earlier same-color bar (7 bars total), keep the 6-bar MATCH window
+  const sevenSpanPullback = makeFlow([0.001, 0.001, 0.001, 0.001, -0.00025, 0.001, 0.001]);
+  const resCap = analyzeCandleTrend(sevenSpanPullback, DEFAULT_SCANNER_CONFIG, {
+    includeLastCandle: true,
+  });
+  assert.equal(resCap.status, 'MATCH');
+  assert.equal(resCap.runLength, 6);
+  assert.equal(resCap.counterCandles, 1);
 });
 
 test('rejects run when one bar is overly long or overly short relative to peers', () => {

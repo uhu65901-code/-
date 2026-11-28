@@ -11,7 +11,10 @@ import {
   Upload,
   XCircle,
 } from 'lucide-react';
-import { parseImportedAiSamples } from '../lib/aiPatternLearner';
+import {
+  computeFeatureAlignmentPct,
+  parseImportedAiSamples,
+} from '../lib/aiPatternLearner';
 import {
   AiPatternModel,
   MAX_AI_TRAINING_SAMPLES,
@@ -130,10 +133,10 @@ export const AiPatternPanel: React.FC<AiPatternPanelProps> = ({
             </div>
             <div>
               <h2 className="text-base font-bold text-[#F8FAFC]">
-                AI เรียนรู้ทรงกราฟไหลเทรนด์ขึ้น / เทรนด์ลง กรอบ M15 (เก็บในอุปกรณ์ของคุณ)
+                AI เรียนรู้จาก 4–6 แท่งล่าสุด (ความสม่ำเสมอ · ปริมาณไส้ · การเรียงตัว)
               </h2>
               <p className="mt-1 text-xs text-[#94A3B8]">
-                พิมพ์ชื่อหากราฟที่ต้องการในหน้าตัวสแกนแล้วกดปุ่ม &quot;ผ่าน&quot; เพื่อสอน AI ว่ากราฟไหลเป็นเทรนด์สีเดียวกันสม่ำเสมอในกรอบ M15 (15–20 แท่ง) คือผ่านเงื่อนไข เก็บข้อมูลตัวอย่างได้สูงสุด {MAX_AI_TRAINING_SAMPLES.toLocaleString()} ตัวอย่าง (มากกว่า 500 ตัวอย่าง)
+                ผู้ใช้ต้องเป็นคนสอนด้วยตัวเองเท่านั้น (ระบบไม่สร้างตัวอย่างอัตโนมัติ) โดย AI จะเรียนรู้จาก 4–6 แท่งล่าสุดที่กด &quot;ผ่าน&quot; หรือ &quot;ไม่ผ่าน&quot; และค่อยปรับอันดับกราฟสม่ำเสมอตามความสวยในตารางกราฟให้ดีขึ้นเรื่อยๆ (เก็บสูงสุด {MAX_AI_TRAINING_SAMPLES.toLocaleString()} ตัวอย่างในอุปกรณ์)
               </p>
             </div>
           </div>
@@ -260,35 +263,47 @@ export const AiPatternPanel: React.FC<AiPatternPanelProps> = ({
           </div>
         </div>
 
-        {/* Learned Profile Metrics */}
+        {/* Learned Profile Metrics (3 user-taught pillars across 4-6 latest bars) */}
         {aiModel.preferredSummary ? (
           <div className="pt-4 border-t border-[#1A2438] space-y-3">
             <div className="text-xs font-semibold text-[#CBD5E1]">
-              สเปกทรงกราฟที่ AI จดจำได้จากตัวอย่าง &quot;ผ่าน&quot; ({aiModel.passCount} ทรง)
+              สเปก 4–6 แท่งล่าสุดที่ผู้ใช้สอน AI เอง ({aiModel.passCount} ทรงผ่าน)
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div className="p-3 rounded-lg bg-[#0B111E] border border-[#1E293B]">
-                <div className="text-[11px] text-[#94A3B8]">ความยาวเทรนด์เฉลี่ย</div>
-                <div className="mt-1 text-base font-bold font-mono-tabular text-[#F8FAFC]">
-                  {aiModel.preferredSummary.idealRunLength} แท่ง
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-[#0B111E] border border-[#1E293B]">
-                <div className="text-[11px] text-[#94A3B8]">สัดส่วนไส้เทียนที่ชอบ</div>
-                <div className="mt-1 text-base font-bold font-mono-tabular text-emerald-400">
-                  ~{aiModel.preferredSummary.idealWickPercent}%
-                </div>
-              </div>
-              <div className="p-3 rounded-lg bg-[#0B111E] border border-[#1E293B]">
-                <div className="text-[11px] text-[#94A3B8]">ความสม่ำเสมอที่ชอบ</div>
+                <div className="text-[11px] text-[#94A3B8]">ความสม่ำเสมอของแท่ง</div>
                 <div className="mt-1 text-base font-bold font-mono-tabular text-[#60A5FA]">
                   {aiModel.preferredSummary.idealUniformity}/100
                 </div>
+                <div className="text-[10px] font-mono-tabular text-[#64748B]">
+                  ต่ำสุดที่ผ่าน {aiModel.preferredSummary.minUniformity}/100 · ขนาด {aiModel.preferredSummary.idealBodyRatio}x
+                </div>
               </div>
               <div className="p-3 rounded-lg bg-[#0B111E] border border-[#1E293B]">
-                <div className="text-[11px] text-[#94A3B8]">ขนาดเนื้อเทียนเทียบเฉลี่ย</div>
+                <div className="text-[11px] text-[#94A3B8]">ปริมาณไส้ที่ AI จำได้</div>
+                <div className="mt-1 text-base font-bold font-mono-tabular text-emerald-400">
+                  ~{aiModel.preferredSummary.idealWickPercent}%
+                </div>
+                <div className="text-[10px] font-mono-tabular text-[#64748B]">
+                  สูงสุดที่ผ่าน {aiModel.preferredSummary.maxWickPercent}%
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-[#0B111E] border border-[#1E293B]">
+                <div className="text-[11px] text-[#94A3B8]">การเรียงตัวที่ AI จำได้</div>
                 <div className="mt-1 text-base font-bold font-mono-tabular text-amber-300">
-                  {aiModel.preferredSummary.idealBodyRatio}x
+                  {aiModel.preferredSummary.idealAlignment ?? 90}/100
+                </div>
+                <div className="text-[10px] font-mono-tabular text-[#64748B]">
+                  ต่ำสุดที่ผ่าน {aiModel.preferredSummary.minAlignment ?? 85}/100
+                </div>
+              </div>
+              <div className="p-3 rounded-lg bg-[#0B111E] border border-[#1E293B]">
+                <div className="text-[11px] text-[#94A3B8]">ช่วง 4–6 แท่งที่สอน</div>
+                <div className="mt-1 text-base font-bold font-mono-tabular text-[#F8FAFC]">
+                  {aiModel.preferredSummary.idealRunLength} แท่ง
+                </div>
+                <div className="text-[10px] text-[#64748B]">
+                  ไม่ผ่าน {aiModel.rejectCount} ทรง (สอนเอง)
                 </div>
               </div>
             </div>
@@ -357,8 +372,9 @@ export const AiPatternPanel: React.FC<AiPatternPanelProps> = ({
                   <th className="py-2.5 px-4">สินทรัพย์</th>
                   <th className="py-2.5 px-4">ทิศทาง</th>
                   <th className="py-2.5 px-4 text-right">ความยาว</th>
-                  <th className="py-2.5 px-4 text-right">ไส้เฉลี่ย</th>
-                  <th className="py-2.5 px-4 text-right">สม่ำเสมอ</th>
+                  <th className="py-2.5 px-4 text-right">ความสม่ำเสมอ</th>
+                  <th className="py-2.5 px-4 text-right">ปริมาณไส้</th>
+                  <th className="py-2.5 px-4 text-right">การเรียงตัว</th>
                   <th className="py-2.5 px-4 text-right">จัดการ</th>
                 </tr>
               </thead>
@@ -413,11 +429,14 @@ export const AiPatternPanel: React.FC<AiPatternPanelProps> = ({
                     <td className="py-2.5 px-4 text-right font-mono-tabular text-[#E2E8F0] whitespace-nowrap">
                       {sample.runLength} แท่ง
                     </td>
+                    <td className="py-2.5 px-4 text-right font-mono-tabular text-[#60A5FA] whitespace-nowrap">
+                      {sample.uniformityScore}/100
+                    </td>
                     <td className="py-2.5 px-4 text-right font-mono-tabular text-emerald-400 whitespace-nowrap">
                       {(sample.avgWickRatio * 100).toFixed(0)}%
                     </td>
-                    <td className="py-2.5 px-4 text-right font-mono-tabular text-[#E2E8F0] whitespace-nowrap">
-                      {sample.uniformityScore}/100
+                    <td className="py-2.5 px-4 text-right font-mono-tabular text-amber-300 whitespace-nowrap">
+                      {sample.features ? `${computeFeatureAlignmentPct(sample.features)}%` : '--'}
                     </td>
                     <td className="py-2.5 px-4 text-right whitespace-nowrap">
                       <button

@@ -13,6 +13,7 @@ import {
   type TrendDirection,
 } from './src/lib/types.ts';
 import { createFeedbackSample } from './src/lib/aiPatternLearner.ts';
+import { sanitizeCandleBodyConfig } from './src/lib/candleBodyStats.ts';
 import {
   buildProgramZipBuffer,
   buildStandaloneAppHtmlBuffer,
@@ -276,7 +277,7 @@ async function startServer() {
         clampNumber(body.minMatchScore, 75, 98, cur.minMatchScore)
       ),
       maxCounterCandles: Math.round(
-        clampNumber(body.maxCounterCandles, 0, 1, cur.maxCounterCandles)
+        clampNumber(body.maxCounterCandles, 0, 2, cur.maxCounterCandles)
       ),
       maxBodyToMedianRatio: clampNumber(
         body.maxBodyToMedianRatio,
@@ -324,6 +325,15 @@ async function startServer() {
         typeof body.includeFormingInList === 'boolean'
           ? body.includeFormingInList
           : cur.includeFormingInList,
+      rankRefreshIntervalSec: Math.round(
+        clampNumber(body.rankRefreshIntervalSec, 30, 60, cur.rankRefreshIntervalSec)
+      ),
+      candleBodyDisplay: body.candleBodyDisplay
+        ? sanitizeCandleBodyConfig(body.candleBodyDisplay)
+        : cur.candleBodyDisplay,
+      candleWickDisplay: body.candleWickDisplay
+        ? sanitizeCandleBodyConfig(body.candleWickDisplay)
+        : cur.candleWickDisplay,
     };
 
     const updated = engine.updateSessionConfig(session.token, nextConfig) ?? DEFAULT_SCANNER_CONFIG;
@@ -417,10 +427,10 @@ async function startServer() {
       swingScoreNorm: clampNumber(rawFeatures.swingScoreNorm, 0, 1, 0.9),
     };
 
-    if (features.directionalEfficiency < 0.58) {
+    if (verdict === 'PASS' && features.directionalEfficiency < 0.42) {
       res.status(400).json({
         error:
-          'กราฟนี้ยังเป็นไซด์เวย์ในกรอบ M15 — AI จะเรียนรู้เฉพาะกราฟไหลเป็นเทรนด์ขึ้นหรือเทรนด์ลงเท่านั้น',
+          'กราฟนี้ยังเป็นไซด์เวย์ในกรอบ M15 — หากต้องการสอนว่าไม่สวย กรุณากดปุ่ม "ไม่ผ่าน" แทน',
       });
       return;
     }

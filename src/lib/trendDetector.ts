@@ -120,8 +120,16 @@ function analyzeCandleSlice(
   }
 
   // Walk backwards from the latest bar within the M15 window (<= 20 bars)
-  const maxInspect = Math.min(windowSlice.length, config.targetMaxCandles + 5);
-  const runIndices: number[] = [];
+  // Allows 1-2 small pullback/pause candles inside a 5-6 candle continuation flow
+  const maxCounterAllowed = Math.min(
+    2,
+    Math.max(0, Math.round(config.maxCounterCandles ?? 2))
+  );
+  const maxInspect = Math.min(
+    windowSlice.length,
+    Math.max(config.targetMaxCandles, 6) + 5
+  );
+  let runIndices: number[] = [];
   let counterCount = 0;
 
   for (let offset = 0; offset < maxInspect; offset++) {
@@ -130,16 +138,89 @@ function analyzeCandleSlice(
     const m = getCandleMetrics(c);
 
     if (m.dir === targetDir) {
+      if (counterCount > 0 && runIndices.length >= config.targetMaxCandles) {
+        break;
+      }
       runIndices.unshift(idx);
     } else if (
       offset > 0 &&
-      counterCount < config.maxCounterCandles &&
-      m.body <= medianBody * 0.5
+      counterCount < maxCounterAllowed &&
+      runIndices.length < config.targetMaxCandles &&
+      m.body <= medianBody * 0.85
     ) {
-      const prevIdx = idx - 1;
-      if (prevIdx >= 0 && getCandleMetrics(windowSlice[prevIdx]).dir === targetDir) {
-        counterCount++;
-        runIndices.unshift(idx);
+      // Gather contiguous pullback block (1-2 bars within remaining counter budget)
+      const remainingBudget = maxCounterAllowed - counterCount;
+      const pbIndices: number[] = [];
+      let probe = idx;
+      while (
+        pbIndices.length < remainingBudget &&
+        probe >= 0 &&
+        windowSlice.length - 1 - probe < maxInspect
+      ) {
+        const pm = getCandleMetrics(windowSlice[probe]);
+        if (pm.dir === targetDir) break;
+        if (pm.body > medianBody * 0.85) {
+          pbIndices.length = 0;
+          break;
+        }
+        pbIndices.unshift(probe);
+        probe--;
+      }
+
+      if (
+        pbIndices.length === 0 ||
+        probe < 0 ||
+        runIndices.length + pbIndices.length + 1 > config.targetMaxCandles
+      ) {
+        break;
+      }
+
+      // Gather contiguous targetDir impulse leg immediately left of the pullback block
+      const priorLegIndices: number[] = [];
+      let legProbe = probe;
+      while (legProbe >= 0 && windowSlice.length - 1 - legProbe < maxInspect) {
+        const lm = getCandleMetrics(windowSlice[legProbe]);
+        if (lm.dir !== targetDir) break;
+        priorLegIndices.unshift(legProbe);
+        legProbe--;
+      }
+
+      if (priorLegIndices.length === 0) {
+        break;
+      }
+
+      const priorStart = windowSlice[priorLegIndices[0]];
+      const priorEnd = windowSlice[priorLegIndices[priorLegIndices.length - 1]];
+      const avgPriorBody =
+        priorLegIndices.reduce(
+          (s, li) => s + getCandleMetrics(windowSlice[li]).body,
+          0
+        ) / priorLegIndices.length;
+      const maxPbBody = Math.max(
+        ...pbIndices.map((pi) => getCandleMetrics(windowSlice[pi]).body)
+      );
+
+      const priorGain =
+        targetDir === 'UP'
+          ? priorEnd.close - priorStart.open
+          : priorStart.open - priorEnd.close;
+      const pullbackDepth =
+        targetDir === 'UP'
+          ? priorEnd.close -
+            Math.min(...pbIndices.map((pi) => Math.min(windowSlice[pi].open, windowSlice[pi].close)))
+          : Math.max(...pbIndices.map((pi) => Math.max(windowSlice[pi].open, windowSlice[pi].close))) -
+            priorEnd.close;
+
+      if (
+        priorGain > 0 &&
+        pullbackDepth < priorGain * 0.78 &&
+        maxPbBody <= avgPriorBody * 0.88
+      ) {
+        counterCount += pbIndices.length;
+        for (let k = pbIndices.length - 1; k >= 0; k--) {
+          runIndices.unshift(pbIndices[k]);
+        }
+        offset += pbIndices.length - 1;
       } else {
         break;
       }
@@ -148,8 +229,70 @@ function analyzeCandleSlice(
     }
   }
 
+  // Trim any leading non-targetDir bars just in case
+  while (
+    runIndices.length > 0 &&
+    getCandleMetrics(windowSlice[runIndices[0]]).dir !== targetDir
+  ) {
+    runIndices.shift();
+  }
+
+  // 2 counter-color candles are strictly permitted only for 5-6+ bar flows;
+  // shorter (< 5) runs allow at most 1 counter candle, and < 4 allow 0.
+  const countCountersIn = (indices: number[]) =>
+    indices.filter((i) => getCandleMetrics(windowSlice[i]).dir !== targetDir).length;
+
+  counterCount = countCountersIn(runIndices);
+  if (runIndices.length < 5 && counterCount > 1) {
+    // Keep only the tail from the second counter bar onward (strictly <= 1 counter)
+    let seen = 0;
+    let cutAt = 0;
+    for (let k = runIndices.length - 1; k >= 0; k--) {
+      if (getCandleMetrics(windowSlice[runIndices[k]]).dir !== targetDir) {
+        seen++;
+        if (seen > 1) {
+          cutAt = k + 1;
+          break;
+        }
+      }
+    }
+    runIndices = runIndices.slice(cutAt);
+    while (
+      runIndices.length > 0 &&
+      getCandleMetrics(windowSlice[runIndices[0]]).dir !== targetDir
+    ) {
+      runIndices.shift();
+    }
+    counterCount = countCountersIn(runIndices);
+  }
+  if (runIndices.length < 4 && counterCount > 0) {
+    let cutAt = 0;
+    for (let k = runIndices.length - 1; k >= 0; k--) {
+      if (getCandleMetrics(windowSlice[runIndices[k]]).dir !== targetDir) {
+        cutAt = k + 1;
+        break;
+      }
+    }
+    runIndices = runIndices.slice(cutAt);
+    counterCount = countCountersIn(runIndices);
+  }
+
   const runLength = runIndices.length;
   const globalMatchedIndices = runIndices.map((idx) => idx + windowStart);
+
+  // Compute basic body & wick stats upfront so OVEREXTENDED and NONE always report real metrics
+  const basicCandles = runIndices.map((i) => windowSlice[i]);
+  const basicMetrics = basicCandles.map(getCandleMetrics);
+  const basicSameDir = basicMetrics.filter((m) => m.dir === targetDir);
+  const basicWickRatio =
+    basicSameDir.length > 0
+      ? basicSameDir.reduce((s, m) => s + m.wickRatio, 0) / basicSameDir.length
+      : 0;
+  const basicMeanBody =
+    basicSameDir.length > 0
+      ? basicSameDir.reduce((s, m) => s + m.body, 0) / basicSameDir.length
+      : 0;
+  const basicBodyRatio = medianBody > 0 ? basicMeanBody / medianBody : 0;
 
   // Check if overextended beyond configured max candles
   if (runLength > config.targetMaxCandles) {
@@ -161,11 +304,11 @@ function analyzeCandleSlice(
       signalIndex: globalMatchedIndices[globalMatchedIndices.length - 1] ?? null,
       signalPrice: latestBar.close,
       signalTime: latestBar.time,
-      avgWickRatio: 0,
+      avgWickRatio: basicWickRatio,
       uniformityScore: 0,
       matchScore: 0,
       directionalEfficiency: 0,
-      avgBodyToMedianRatio: 0,
+      avgBodyToMedianRatio: basicBodyRatio,
       counterCandles: counterCount,
       swingScore: 0,
       emaValues: fullEmaValues,
@@ -176,7 +319,14 @@ function analyzeCandleSlice(
   }
 
   if (runLength < Math.max(2, config.targetMinCandles - 1)) {
-    return emptyAnalysis(fullEmaValues, `เพิ่งเรียงตัว ${runLength} แท่ง รอการยืนยัน`);
+    const res = emptyAnalysis(fullEmaValues, `เพิ่งเรียงตัว ${runLength} แท่ง รอการยืนยัน`);
+    res.direction = targetDir;
+    res.runLength = runLength;
+    res.matchedIndices = globalMatchedIndices;
+    res.avgWickRatio = basicWickRatio;
+    res.avgBodyToMedianRatio = basicBodyRatio;
+    res.counterCandles = counterCount;
+    return res;
   }
 
   // Evaluate quality metrics across the recent compared candles in M15 window
@@ -312,11 +462,25 @@ function analyzeCandleSlice(
   }
 
   const wickScore = Math.max(0, Math.min(100, Math.round(100 - avgWickRatio * 72)));
-  const effScore = Math.max(0, Math.min(100, Math.round(directionalEfficiency * 108)));
+  const effMultiplier =
+    counterCount >= 2 ? 175 : counterCount === 1 ? 145 : 108;
+  const effScore = Math.max(
+    0,
+    Math.min(100, Math.round(directionalEfficiency * effMultiplier))
+  );
   const emaTrendScore = Math.max(
     0,
-    Math.min(100, Math.round(emaAlignedRatio * 70 + (emaSlopeAligned ? 30 : 0)))
+    Math.min(
+      100,
+      Math.round(
+        (counterCount >= 1 ? Math.min(1, emaAlignedRatio * 1.25) : emaAlignedRatio) *
+          70 +
+          (emaSlopeAligned ? 30 : 0)
+      )
+    )
   );
+  const effectiveSwingForScore =
+    counterCount >= 1 ? Math.min(100, Math.round(swingScore * 1.15)) : swingScore;
   const baseMatchScore = Math.max(
     0,
     Math.min(
@@ -324,7 +488,7 @@ function analyzeCandleSlice(
       Math.round(
         uniformityScore * 0.28 +
           wickScore * 0.22 +
-          swingScore * 0.2 +
+          effectiveSwingForScore * 0.2 +
           effScore * 0.16 +
           emaTrendScore * 0.14
       )
@@ -362,20 +526,44 @@ function analyzeCandleSlice(
   const reasons: string[] = [];
   let passesQuality = true;
 
+  const learnedPref =
+    config.aiLearningEnabled && aiContext && aiContext.model.passCount >= 1
+      ? aiContext.model.preferredSummary
+      : null;
+  const strongAiSpecMatch =
+    Boolean(learnedPref) &&
+    (aiResult.aiSimilarityScore ?? 0) >= 82 &&
+    directionalEfficiency >= 0.65;
+
+  const effectiveMaxWick =
+    strongAiSpecMatch && learnedPref?.maxWickPercent !== undefined
+      ? Math.max(config.maxWickRatio, Math.min(0.4, learnedPref.maxWickPercent / 100 + 0.03))
+      : config.maxWickRatio;
+
+  const effectiveMinUniformity =
+    strongAiSpecMatch && learnedPref?.minUniformity !== undefined
+      ? Math.min(config.minUniformityScore, Math.max(64, learnedPref.minUniformity - 4))
+      : config.minUniformityScore;
+
+  const effectiveMaxBodyRatio =
+    strongAiSpecMatch && learnedPref?.maxBodyRatio !== undefined
+      ? Math.max(config.maxBodyToMedianRatio, Math.min(2.25, learnedPref.maxBodyRatio * 1.1))
+      : config.maxBodyToMedianRatio;
+
   if (
-    avgWickRatio > config.maxWickRatio ||
-    maxSingleWickRatio > config.maxWickRatio * 1.65 ||
+    avgWickRatio > effectiveMaxWick ||
+    maxSingleWickRatio > effectiveMaxWick * 1.65 ||
     hasExcessiveReverseWick
   ) {
     passesQuality = false;
     reasons.push(
-      `ไส้เทียนเฉลี่ย ${(avgWickRatio * 100).toFixed(0)}% สูงกว่าเกณฑ์ ${(config.maxWickRatio * 100).toFixed(0)}%`
+      `ไส้เทียนเฉลี่ย ${(avgWickRatio * 100).toFixed(0)}% สูงกว่าเกณฑ์ ${(effectiveMaxWick * 100).toFixed(0)}%`
     );
   } else {
     reasons.push(`ไส้เล็กน้อยสวยงาม เฉลี่ย ${(avgWickRatio * 100).toFixed(1)}%`);
   }
 
-  if (uniformityScore < config.minUniformityScore || hasUnevenPeerBar) {
+  if (uniformityScore < effectiveMinUniformity || hasUnevenPeerBar) {
     passesQuality = false;
     reasons.push(
       `ขนาดแท่งเทียนต่างกันมากเกินไป (${uniformityScore}/100)`
@@ -385,8 +573,8 @@ function analyzeCandleSlice(
   }
 
   if (
-    maxSingleBodyRatio > config.maxBodyToMedianRatio ||
-    avgBodyToMedianRatio > config.maxBodyToMedianRatio * 0.94
+    maxSingleBodyRatio > effectiveMaxBodyRatio ||
+    avgBodyToMedianRatio > effectiveMaxBodyRatio * 0.94
   ) {
     passesQuality = false;
     reasons.push('พบแท่งยาวกระชากเกินเกณฑ์');
@@ -397,18 +585,43 @@ function analyzeCandleSlice(
     reasons.push(`ขนาดเนื้อเทียนพอดี (${avgBodyToMedianRatio.toFixed(2)}x ค่าเฉลี่ย)`);
   }
 
-  if (swingScore < 88) {
+  const requiredSwing = counterCount >= 2 ? 60 : counterCount === 1 ? 72 : 88;
+  if (swingScore < requiredSwing) {
     passesQuality = false;
     reasons.push('กราฟมีการสวิงย้อนตัวระหว่างแท่ง');
   } else {
-    reasons.push(`เรียงตัวสีเดียวสวย (${swingScore}%)`);
+    reasons.push(
+      counterCount > 0
+        ? `พักตัว ${counterCount} แท่งแล้วไหลต่อสวย (${swingScore}%)`
+        : `เรียงตัวสีเดียวสวย (${swingScore}%)`
+    );
   }
 
+  const requiredEfficiency = counterCount >= 2 ? 0.38 : counterCount === 1 ? 0.48 : 0.7;
+  const requiredEmaRatio = counterCount >= 2 ? 0.5 : counterCount === 1 ? 0.6 : 0.75;
+  const requiredNetMove =
+    counterCount > 0
+      ? medianBody * Math.max(1.4, (sameDirMetrics.length - counterCount) * 0.65)
+      : medianBody * Math.max(1.8, runLength * 0.48);
+  const pullbackWithinStart =
+    counterCount === 0 ||
+    runCandles.every((bar) =>
+      targetDir === 'UP'
+        ? bar.low >= firstRunBar.open - medianBody * 0.35
+        : bar.high <= firstRunBar.open + medianBody * 0.35
+    );
+  const counterBarsValidForLen =
+    counterCount === 0 ||
+    (counterCount === 1 && runLength >= 4 && sameDirMetrics.length >= 3) ||
+    (counterCount === 2 && runLength >= 5 && sameDirMetrics.length >= 3);
+
   if (
-    directionalEfficiency < 0.7 ||
-    netMove < medianBody * Math.max(1.8, runLength * 0.48) ||
+    !counterBarsValidForLen ||
+    !pullbackWithinStart ||
+    directionalEfficiency < requiredEfficiency ||
+    netMove < requiredNetMove ||
     !emaSlopeAligned ||
-    emaAlignedRatio < 0.75 ||
+    emaAlignedRatio < requiredEmaRatio ||
     !breaksPriorRange
   ) {
     passesQuality = false;
@@ -417,7 +630,7 @@ function analyzeCandleSlice(
     reasons.push(`ไหลสวยชัดเจนในกรอบ M15 (ความชัน ${Math.round(directionalEfficiency * 100)}%)`);
   }
 
-  if (aiResult.aiLabel && aiResult.aiDeltaScore <= -7) {
+  if (aiResult.aiLabel && aiResult.aiDeltaScore <= -6) {
     passesQuality = false;
     reasons.push(aiResult.aiLabel);
   } else if (aiResult.aiLabel) {
@@ -442,6 +655,7 @@ function analyzeCandleSlice(
   } else if (
     runLength === config.targetMinCandles - 1 &&
     runLength >= 2 &&
+    counterCount === 0 &&
     !hasUnevenPeerBar &&
     !hasExcessiveReverseWick &&
     swingScore >= 88 &&

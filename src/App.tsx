@@ -1,19 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bell,
   Brain,
-  CheckCircle2,
   Download,
   ListFilter,
   Pause,
   Play,
   Sun,
   TrendingUp,
-  Volume2,
-  VolumeX,
   X,
-  XCircle,
-  Zap,
 } from 'lucide-react';
 import {
   assessChartFlowForAiTraining,
@@ -55,15 +49,9 @@ import { ActiveTab, HeaderBar } from './components/HeaderBar';
 import { CandlestickChart } from './components/CandlestickChart';
 import { ChartQuickSearch } from './components/ChartQuickSearch';
 import { ScannerSidebar } from './components/ScannerSidebar';
-import { AlertsHistoryView } from './components/AlertsHistoryView';
 import { ScannerSettingsView } from './components/ScannerSettingsView';
 import { DownloadInstallModal } from './components/DownloadInstallModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallButton';
-import {
-  playTrendAlertChime,
-  triggerSignalVibration,
-  unlockAudioContext,
-} from './utils/soundAlert';
 
 interface SessionInfo {
   token: string;
@@ -96,7 +84,6 @@ export default function App() {
   const [selectedAssetIds, setSelectedAssetIds] = useState<string[]>([]);
   const [activeSlotIndex, setActiveSlotIndex] = useState<number>(0);
 
-  const [liveBannerAlert, setLiveBannerAlert] = useState<TrendAlert | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [showDownloadModal, setShowDownloadModal] = useState(false);
@@ -111,7 +98,6 @@ export default function App() {
   const localConfigRef = useRef<ScannerConfig>(config);
   const localActiveRef = useRef<boolean>(true);
   const chartWorkspaceRef = useRef<HTMLElement | null>(null);
-  const lastSoundAtRef = useRef<number>(0);
 
   useEffect(() => {
     localConfigRef.current = config;
@@ -120,31 +106,6 @@ export default function App() {
   useEffect(() => {
     localActiveRef.current = session?.scanningActive ?? true;
   }, [session?.scanningActive]);
-
-  const soundConfigRef = useRef({
-    enabled: config.soundEnabled,
-    volume: config.soundVolume,
-    durationMode: config.soundDurationMode,
-  });
-
-  useEffect(() => {
-    soundConfigRef.current = {
-      enabled: config.soundEnabled,
-      volume: config.soundVolume,
-      durationMode: config.soundDurationMode,
-    };
-  }, [config.soundEnabled, config.soundVolume, config.soundDurationMode]);
-
-  // Unlock Web Audio on first user touch/pointer interaction (critical on Android Chrome)
-  useEffect(() => {
-    const unlock = () => unlockAudioContext();
-    window.addEventListener('pointerdown', unlock, { once: true, passive: true });
-    window.addEventListener('touchstart', unlock, { once: true, passive: true });
-    return () => {
-      window.removeEventListener('pointerdown', unlock);
-      window.removeEventListener('touchstart', unlock);
-    };
-  }, []);
 
   // Screen Wake Lock for keeping Android screen awake while monitoring 1m charts
   useEffect(() => {
@@ -265,8 +226,6 @@ export default function App() {
       setDecisionRecords(snap0.decisionRecords);
       setAiSamples(snap0.aiSamples);
       saveAiSamplesLocally(snap0.aiSamples);
-      const firstUnacked = unique0.find((a) => !a.acknowledged);
-      if (firstUnacked) setLiveBannerAlert(firstUnacked);
       setWsConnected(true);
 
       const timer = window.setInterval(() => {
@@ -278,30 +237,6 @@ export default function App() {
         setDecisionRecords(snap.decisionRecords);
         if (newAlerts.length > 0) {
           saveAlertsLocally(unique);
-          const bestNewAlert = [...newAlerts].sort(
-            (a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0)
-          )[0];
-          if (bestNewAlert) {
-            setLiveBannerAlert((prev) =>
-              !prev ||
-              prev.acknowledged ||
-              (bestNewAlert.matchScore ?? 0) >= (prev.matchScore ?? 0)
-                ? bestNewAlert
-                : prev
-            );
-            const nowMs = Date.now();
-            if (nowMs - lastSoundAtRef.current >= 8000) {
-              lastSoundAtRef.current = nowMs;
-              triggerSignalVibration();
-              if (soundConfigRef.current.enabled) {
-                playTrendAlertChime(
-                  bestNewAlert.direction,
-                  soundConfigRef.current.volume,
-                  soundConfigRef.current.durationMode
-                );
-              }
-            }
-          }
         }
       }, 1000);
 
@@ -319,27 +254,7 @@ export default function App() {
         initialAiSamples: loadSavedAiSamples(),
         getConfig: () => localConfigRef.current,
         isScanningActive: () => localActiveRef.current,
-        onSignal: (alert) => {
-          setLiveBannerAlert((prev) =>
-            !prev ||
-            prev.acknowledged ||
-            (alert.matchScore ?? 0) >= (prev.matchScore ?? 0)
-              ? alert
-              : prev
-          );
-          const nowMs = Date.now();
-          if (nowMs - lastSoundAtRef.current >= 8000) {
-            lastSoundAtRef.current = nowMs;
-            triggerSignalVibration();
-            if (soundConfigRef.current.enabled) {
-              playTrendAlertChime(
-                alert.direction,
-                soundConfigRef.current.volume,
-                soundConfigRef.current.durationMode
-              );
-            }
-          }
-        },
+        onSignal: () => {},
         onUpdate: () => {
           const snap = browserScanner.getSnapshot(localConfigRef.current);
           const unique = deduplicateAlertsByAsset(snap.alerts);
@@ -419,10 +334,6 @@ export default function App() {
         if (Array.isArray(data.alerts)) {
           const unique = deduplicateAlertsByAsset(data.alerts);
           setAlerts(unique);
-          const firstUnacked = unique.find((a: TrendAlert) => !a.acknowledged);
-          if (firstUnacked) {
-            setLiveBannerAlert(firstUnacked);
-          }
         }
         if (Array.isArray(data.decisionRecords)) {
           setDecisionRecords(data.decisionRecords);
@@ -529,25 +440,6 @@ export default function App() {
                   normalizeAssetHistoryKey(item.assetName, item.assetId) !== newKey
               ),
             ]);
-            setLiveBannerAlert((prev) =>
-              !prev ||
-              prev.acknowledged ||
-              (newAlert.matchScore ?? 0) >= (prev.matchScore ?? 0)
-                ? newAlert
-                : prev
-            );
-            const nowMs = Date.now();
-            if (nowMs - lastSoundAtRef.current >= 8000) {
-              lastSoundAtRef.current = nowMs;
-              triggerSignalVibration();
-              if (soundConfigRef.current.enabled) {
-                playTrendAlertChime(
-                  newAlert.direction,
-                  soundConfigRef.current.volume,
-                  soundConfigRef.current.durationMode
-                );
-              }
-            }
           }
         } catch {
           // ignore malformed messages
@@ -672,7 +564,6 @@ export default function App() {
         setDecisionRecords(snap.decisionRecords);
         saveAlertsLocally(unique);
         saveDecisionRecordsLocally(snap.decisionRecords);
-        if (liveBannerAlert?.id === alertId) setLiveBannerAlert(null);
       }
       return;
     }
@@ -696,9 +587,6 @@ export default function App() {
           setAlerts((prev) =>
             prev.map((a) => (a.id === alertId ? data.alert : a))
           );
-          if (liveBannerAlert?.id === alertId) {
-            setLiveBannerAlert(null);
-          }
         }
         if (Array.isArray(data.decisionRecords)) {
           setDecisionRecords(data.decisionRecords);
@@ -775,7 +663,9 @@ export default function App() {
     const analysisMatchesDir =
       Boolean(assetState.analysis.patternFeatures) &&
       Boolean(assetState.analysis.direction) &&
-      assetState.analysis.directionalEfficiency >= 0.58 &&
+      assetState.analysis.runLength >= 4 &&
+      assetState.analysis.runLength <= 6 &&
+      (verdict === 'REJECT' || assetState.analysis.directionalEfficiency >= 0.45) &&
       (!forcedDirection || assetState.analysis.direction === forcedDirection);
 
     let targetDir: TrendDirection;
@@ -798,7 +688,8 @@ export default function App() {
         assetState.candles,
         assetState.analysis.emaValues,
         config,
-        forcedDirection
+        forcedDirection,
+        verdict
       );
       if (!flow.ok) {
         return { ok: false, message: flow.reason };
@@ -845,7 +736,7 @@ export default function App() {
         s &&
         (s.direction === 'UP' || s.direction === 'DOWN') &&
         s.features &&
-        s.features.directionalEfficiency >= 0.58
+        (s.verdict === 'REJECT' || s.features.directionalEfficiency >= 0.42)
       ) {
         mergedMap.set(s.id, s);
       }
@@ -893,63 +784,6 @@ export default function App() {
     }
   };
 
-  const handleTrainAiFromAlert = async (
-    alert: TrendAlert,
-    verdict: PatternVerdict
-  ) => {
-    const matchedAsset = assets.find((a) => a.asset.id === alert.assetId);
-    const features: PatternFeatureVector =
-      alert.patternFeatures ??
-      matchedAsset?.analysis.patternFeatures ?? {
-        runLengthNorm: Math.min(1.6, Math.max(0.3, alert.runLength / 6)),
-        avgWickRatio: alert.avgWickRatio,
-        reverseWickRatio: Math.min(0.4, alert.avgWickRatio * 0.8),
-        uniformityScoreNorm: Math.min(1, Math.max(0, alert.uniformityScore / 100)),
-        avgBodyToMedianRatio: 1,
-        bodyTrendSlope: 1,
-        directionalEfficiency: 0.86,
-        emaDistanceRatio: 0.75,
-        swingScoreNorm: 0.92,
-      };
-
-    const sample = createFeedbackSample({
-      alertId: alert.id,
-      assetId: alert.assetId,
-      assetName: alert.assetName,
-      direction: alert.direction,
-      verdict,
-      baseMatchScore: alert.matchScore ?? alert.uniformityScore,
-      aiScoreAtTime: alert.aiSimilarityScore,
-      runLength: alert.runLength,
-      avgWickRatio: alert.avgWickRatio,
-      uniformityScore: alert.uniformityScore,
-      features,
-    });
-
-    setAlerts((prev) =>
-      prev.map((item) =>
-        item.id === alert.id
-          ? {
-              ...item,
-              aiVerdict: verdict,
-              acknowledged: verdict === 'PASS' ? true : item.acknowledged,
-            }
-          : item
-      )
-    );
-
-    if (liveBannerAlert?.id === alert.id) {
-      if (verdict === 'REJECT') {
-        setLiveBannerAlert(null);
-      } else {
-        setLiveBannerAlert((prev) =>
-          prev ? { ...prev, aiVerdict: verdict, acknowledged: true } : prev
-        );
-      }
-    }
-
-    await submitAiSample(sample);
-  };
 
   const handleRemoveAiSample = async (sampleId: string) => {
     if (!session) return;
@@ -1043,16 +877,18 @@ export default function App() {
     setAssets([]);
     setAlerts([]);
     setDecisionRecords([]);
-    setLiveBannerAlert(null);
     setSelectionNotice(null);
     setSelectedAssetIds([]);
     setWsConnected(false);
   };
 
-  const rankedAssetsForSelection = useMemo(
-    () => [...assets].sort((a, b) => compareAssetsByFlowRank(a, b)),
-    [assets]
-  );
+  const rankedAssetsForSelection = useMemo(() => {
+    const aiCtx =
+      aiSamples.length > 0 ? { model: aiModel, samples: aiSamples } : undefined;
+    return [...assets].sort((a, b) =>
+      compareAssetsByFlowRank(a, b, undefined, aiCtx)
+    );
+  }, [assets, aiModel, aiSamples]);
 
   const topRankedAsset = rankedAssetsForSelection[0] ?? null;
 
@@ -1177,10 +1013,6 @@ export default function App() {
     return result;
   }, [assets, chartCount, rankedAssetsForSelection, selectedAssetIds]);
 
-  const unacknowledgedCount = useMemo(
-    () => alerts.filter((a) => !a.acknowledged).length,
-    [alerts]
-  );
 
   const matchCount = useMemo(
     () => assets.filter((a) => a.analysis.status === 'MATCH').length,
@@ -1208,87 +1040,8 @@ export default function App() {
       <HeaderBar
         activeTab={activeTab}
         onSelectTab={setActiveTab}
-        unacknowledgedCount={unacknowledgedCount}
         onLogout={handleLogout}
       />
-
-      {/* Real-Time Alert Banner */}
-      {liveBannerAlert && (
-        <div
-          role="status"
-          className={`border-b px-4 lg:px-6 py-2.5 flex flex-wrap items-center justify-between gap-3 ${
-            liveBannerAlert.direction === 'UP'
-              ? 'bg-emerald-950/75 border-emerald-500/40'
-              : 'bg-rose-950/75 border-rose-500/40'
-          }`}
-        >
-          <div className="flex items-center gap-3 text-xs sm:text-sm">
-            <Bell
-              className={`w-4 h-4 shrink-0 ${
-                liveBannerAlert.direction === 'UP'
-                  ? 'text-[#16C784]'
-                  : 'text-[#F45B69]'
-              }`}
-            />
-            <span className="font-semibold text-[#F8FAFC]">
-              พบกราฟเข้าเงื่อนไข: {liveBannerAlert.assetName}
-            </span>
-            <span className="text-[#CBD5E1]">
-              {liveBannerAlert.direction === 'UP'
-                ? 'เทรนด์ไหลขาขึ้น (CALL)'
-                : 'เทรนด์ไหลขาลง (PUT)'}{' '}
-              · {liveBannerAlert.runLength} แท่ง · ไส้{' '}
-              {(liveBannerAlert.avgWickRatio * 100).toFixed(0)}%
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => handleTrainAiFromAlert(liveBannerAlert, 'PASS')}
-              className={`px-3 py-1 text-xs font-semibold rounded inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
-                liveBannerAlert.aiVerdict === 'PASS'
-                  ? 'bg-emerald-500 text-[#052E16]'
-                  : 'bg-[#16C784] hover:bg-emerald-400 text-[#052E16]'
-              }`}
-              title="กดเมื่อทรงกราฟสวยผ่านเงื่อนไข เพื่อให้ AI เรียนรู้และคัดทรงคล้ายกันได้ดีขึ้น"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>
-                {liveBannerAlert.aiVerdict === 'PASS'
-                  ? 'ผ่านแล้ว (AI จำทรงนี้)'
-                  : 'ผ่าน (สอน AI)'}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleTrainAiFromAlert(liveBannerAlert, 'REJECT')}
-              className="px-2.5 py-1 text-xs font-medium rounded border border-rose-400/40 bg-rose-500/10 hover:bg-rose-500/20 text-rose-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
-              title="บอก AI ว่าทรงกราฟนี้ยังไม่ผ่านเกณฑ์"
-            >
-              <XCircle className="w-3.5 h-3.5" />
-              <span>ไม่ผ่าน</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                handleSelectAssetForSlot(liveBannerAlert.assetId, liveBannerAlert.assetName);
-                handleMarkDecision(liveBannerAlert.id, 'WATCHED');
-              }}
-              className="px-3 py-1 text-xs font-medium rounded bg-[#162033] hover:bg-[#1E2B44] text-[#F8FAFC] cursor-pointer whitespace-nowrap"
-            >
-              เปิดดูกราฟ
-            </button>
-            <button
-              type="button"
-              onClick={() => handleMarkDecision(liveBannerAlert.id, 'WATCHED')}
-              className="px-3 py-1 text-xs font-medium rounded border border-[#334155] text-[#CBD5E1] hover:text-white cursor-pointer whitespace-nowrap"
-            >
-              รับทราบ
-            </button>
-          </div>
-        </div>
-      )}
 
       {activeTab === 'scanner' && (
         <main className="flex-1 flex flex-col lg:flex-row min-h-0">
@@ -1458,41 +1211,6 @@ export default function App() {
                     </select>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleFilterChange({
-                        realtimeAlertImmediate: !config.realtimeAlertImmediate,
-                      })
-                    }
-                    className={`px-2.5 py-1 rounded-lg border text-[11px] sm:text-xs inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors ${
-                      config.realtimeAlertImmediate
-                        ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
-                        : 'bg-[#162033] border-[#273652] text-[#94A3B8]'
-                    }`}
-                    title="แจ้งเตือนแบบเรียลไทม์ทันทีเมื่อแท่งล่าสุดเข้าเงื่อนไข โดยไม่ต้องรอให้จบแท่ง"
-                  >
-                    <Zap className="w-3.5 h-3.5" />
-                    <span>
-                      {config.realtimeAlertImmediate ? 'เตือนทันที' : 'รอจบแท่ง'}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      unlockAudioContext();
-                      handleFilterChange({ soundEnabled: !config.soundEnabled });
-                    }}
-                    className="px-2.5 py-1 rounded-lg bg-[#162033] hover:bg-[#1E2B44] border border-[#273652] text-[11px] sm:text-xs text-[#E2E8F0] inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
-                  >
-                    {config.soundEnabled ? (
-                      <Volume2 className="w-3.5 h-3.5 text-[#16C784]" />
-                    ) : (
-                      <VolumeX className="w-3.5 h-3.5 text-[#64748B]" />
-                    )}
-                    <span>{config.soundEnabled ? 'เสียงเตือน: เปิด' : 'เสียงเตือน: ปิด'}</span>
-                  </button>
 
                   {wakeLockSupported && (
                     <button
@@ -1550,7 +1268,7 @@ export default function App() {
                   </span>
                   <span aria-hidden="true">·</span>
                   <span>
-                    {config.realtimeAlertImmediate ? 'แจ้งเตือนทันที' : `รอแท่ง ${nextMinuteText}`}
+                    อัปเดตอันดับหลังจบแท่ง (แท่งถัดไป {nextMinuteText}) · สีเดียวสวย/ต่างสีพักตัว
                   </span>
                   <span aria-hidden="true">·</span>
                   <span className="text-[#E2E8F0] font-medium">
@@ -1683,7 +1401,15 @@ export default function App() {
                         targetMinCandles={config.targetMinCandles}
                         targetMaxCandles={config.targetMaxCandles}
                         minMatchScore={config.minMatchScore}
+                        candleBodyDisplay={config.candleBodyDisplay}
+                        candleWickDisplay={config.candleWickDisplay}
                         trainedVerdict={recentChartVerdicts[verdictKey] ?? null}
+                        onChangeCandleBodyDisplay={(nextBodyCfg) =>
+                          handleFilterChange({ candleBodyDisplay: nextBodyCfg })
+                        }
+                        onChangeCandleWickDisplay={(nextWickCfg) =>
+                          handleFilterChange({ candleWickDisplay: nextWickCfg })
+                        }
                         onTrainAiPattern={handleTrainAiFromChart}
                         onActivateSlot={() => setActiveSlotIndex(idx)}
                         onRetryCandles={requestAssetCandlesById}
@@ -1707,27 +1433,17 @@ export default function App() {
               assets={assets}
               selectedAssetIds={selectedAssetIds.slice(0, chartCount)}
               activeSlotIndex={Math.min(activeSlotIndex, chartCount - 1)}
+              candleSecondsRemaining={secondsRemaining}
               onSelectAsset={handleSelectAssetForSlot}
               categoryFilter={config.categoryFilter}
               directionFilter={config.directionFilter}
               targetMinCandles={config.targetMinCandles}
               targetMaxCandles={config.targetMaxCandles}
+              aiModel={aiModel}
+              aiSamples={aiSamples}
               onChangeFilters={handleFilterChange}
             />
           </div>
-        </main>
-      )}
-
-      {activeTab === 'alerts' && (
-        <main className="flex-1 overflow-y-auto">
-          <AlertsHistoryView
-            alerts={alerts}
-            onInspectAsset={(assetId, assetName) => {
-              handleSelectAssetForSlot(assetId, assetName);
-            }}
-            onMarkDecision={handleMarkDecision}
-            onTrainAiFromAlert={handleTrainAiFromAlert}
-          />
         </main>
       )}
 

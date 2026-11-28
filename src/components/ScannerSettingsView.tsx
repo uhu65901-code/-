@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { BarChart3, Brain, SlidersHorizontal, Volume2 } from 'lucide-react';
+import { BarChart3, Brain, SlidersHorizontal } from 'lucide-react';
 import {
   AiPatternModel,
   DEFAULT_SCANNER_CONFIG,
@@ -9,7 +9,6 @@ import {
   TradeOutcome,
   TrendAlert,
 } from '../lib/types';
-import { playTrendAlertChime } from '../utils/soundAlert';
 import { AiPatternPanel } from './AiPatternPanel';
 import { PerformanceAnalyticsPanel } from './PerformanceAnalyticsPanel';
 
@@ -90,10 +89,11 @@ export const ScannerSettingsView: React.FC<ScannerSettingsViewProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 border-b border-[#1D273B] pb-4">
         <div>
           <h1 className="text-xl font-bold text-[#F8FAFC]">
-            ตั้งค่าเกณฑ์สแกน, AI เรียนรู้ทรงกราฟ &amp; Win Rate
+            ตั้งค่าเกณฑ์สแกน, สอน AI แท่งไหล &amp;{' '}
+            <span className="whitespace-nowrap">Win Rate</span>
           </h1>
           <p className="mt-1 text-xs text-[#94A3B8]">
-            ปรับเกณฑ์คัดกราฟสีเดียวกัน สม่ำเสมอ มีไส้ได้เล็กน้อย และฝึก AI จากปุ่ม &quot;ผ่าน&quot; เพื่อคัดกรองทรงคล้ายกันแม่นขึ้นเรื่อยๆ
+            อัปเดตตารางอันดับหลังจบแท่ง 1 นาที แยกตารางกราฟสีเดียวล้วนและกราฟพักตัวต่างสี 1–2 แท่ง พร้อมสอน AI จาก 4–6 แท่งล่าสุดด้วยตัวเอง
           </p>
         </div>
 
@@ -182,10 +182,10 @@ export const ScannerSettingsView: React.FC<ScannerSettingsViewProps> = ({
                 htmlFor="min-match-score"
                 className="block text-sm font-semibold text-[#F8FAFC]"
               >
-                ความเข้าเงื่อนไขขั้นต่ำก่อนแจ้งเตือน (สีเดียว · สม่ำเสมอ · มีไส้ได้เล็กน้อย)
+                ความเข้าเงื่อนไขขั้นต่ำในตารางจัดอันดับ (สีเดียว · สม่ำเสมอ · พักตัว 1–2 แท่ง)
               </label>
               <p className="mt-1 text-xs text-[#94A3B8]">
-                ระบบจะแจ้งเตือนทันทีเมื่อกราฟเรียงตัวสีเดียวกันและสม่ำเสมอพอสมควร (ค่าแนะนำ 86% เพื่อไม่ให้พลาดกราฟสวย)
+                ระบบจะจัดอันดับกราฟเข้าเกณฑ์เมื่อเรียงตัวสวยและสม่ำเสมอตามที่กำหนด (ค่าแนะนำ 86%)
               </p>
             </div>
             <span className="px-3 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/40 text-sm font-bold font-mono-tabular text-[#16C784] self-start">
@@ -273,6 +273,23 @@ export const ScannerSettingsView: React.FC<ScannerSettingsViewProps> = ({
             />
             <span className="w-16 text-right text-sm font-mono-tabular text-[#F8FAFC]">
               {draft.scanWindowBars} แท่ง
+            </span>
+          </div>
+        </div>
+
+        {/* Candle-Close Ranking Table Schedule Info */}
+        <div className="p-5 space-y-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <div className="text-sm font-semibold text-[#F8FAFC]">
+                รอบอัปเดตตารางอันดับกราฟไหล: หลังจบแท่ง 1 นาที
+              </div>
+              <p className="mt-1 text-xs text-[#94A3B8]">
+                ตำแหน่งอันดับในตารางจะถูกล็อกนิ่งตลอด 1 นาทีและรีเฟรชอัตโนมัติหลังจบแท่ง พร้อมแสดงปริมาณความยาวเนื้อกราฟและปริมาณไส้เทียนแยกชัดเจนระหว่างตารางสีเดียวล้วนและตารางแท่งต่างสี 1–2 แท่ง
+              </p>
+            </div>
+            <span className="px-3 py-1 rounded-lg bg-indigo-500/15 border border-indigo-500/40 text-xs font-bold text-indigo-300 self-start whitespace-nowrap">
+              อัปเดตหลังจบแท่ง
             </span>
           </div>
         </div>
@@ -455,37 +472,50 @@ export const ScannerSettingsView: React.FC<ScannerSettingsViewProps> = ({
         <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
             <span className="block text-sm font-medium text-[#F1F5F9]">
-              แท่งเทียนสวนสีระหว่างเทรนด์ไหล
+              แท่งเทียนต่างสีในกราฟไหล 5–6 แท่ง (พักตัวแล้วไปต่อ)
             </span>
             <p className="mt-1 text-xs text-[#94A3B8]">
-              เลือกว่าจะรับเฉพาะสีเดียวกันล้วน หรืออนุญาตแท่งสวนขนาดเล็กมากแทรกได้ 1 แท่ง
+              อนุญาตให้มีแท่งต่างสีแทรกพักตัวได้ 1–2 แท่งในชุด 5–6 แท่ง โดยระบบจะแยกแสดงในตารางแท่งต่างสีต่างหาก
             </p>
-            <div className="mt-3 flex items-center p-1 bg-[#0B111E] border border-[#1E293B] rounded-lg">
+            <div className="mt-3 flex items-center p-1 bg-[#0B111E] border border-[#1E293B] rounded-lg gap-1">
               <button
                 type="button"
                 onClick={() =>
                   setDraft((prev) => ({ ...prev, maxCounterCandles: 0 }))
                 }
-                className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                   draft.maxCounterCandles === 0
                     ? 'bg-[#1D2A42] text-[#F8FAFC]'
                     : 'text-[#94A3B8] hover:text-[#E2E8F0]'
                 }`}
               >
-                0 แท่ง (สีเดียวล้วน)
+                0 แท่ง (สีเดียว)
               </button>
               <button
                 type="button"
                 onClick={() =>
                   setDraft((prev) => ({ ...prev, maxCounterCandles: 1 }))
                 }
-                className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
                   draft.maxCounterCandles === 1
                     ? 'bg-[#1D2A42] text-[#F8FAFC]'
                     : 'text-[#94A3B8] hover:text-[#E2E8F0]'
                 }`}
               >
-                แทรกได้ 1 แท่งเล็ก
+                ได้ 1 แท่ง
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setDraft((prev) => ({ ...prev, maxCounterCandles: 2 }))
+                }
+                className={`flex-1 py-1.5 px-2 text-xs font-medium rounded-md transition-colors cursor-pointer whitespace-nowrap ${
+                  draft.maxCounterCandles >= 2
+                    ? 'bg-[#2563EB] text-white'
+                    : 'text-[#94A3B8] hover:text-[#E2E8F0]'
+                }`}
+              >
+                1–2 แท่ง (แนะนำ)
               </button>
             </div>
           </div>
@@ -523,138 +553,7 @@ export const ScannerSettingsView: React.FC<ScannerSettingsViewProps> = ({
           </div>
         </div>
 
-        {/* Real-time Immediate Alert & Loud Sound Settings */}
-        <div className="p-5 space-y-5">
-          <div className="pb-4 border-b border-[#162033]">
-            <label
-              htmlFor="realtime-immediate-toggle"
-              className="text-sm font-medium text-[#F1F5F9] flex items-center gap-2 cursor-pointer"
-            >
-              <input
-                id="realtime-immediate-toggle"
-                type="checkbox"
-                checked={draft.realtimeAlertImmediate}
-                onChange={(e) =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    realtimeAlertImmediate: e.target.checked,
-                  }))
-                }
-                className="w-4 h-4 accent-[#16C784] rounded cursor-pointer"
-              />
-              แจ้งเตือนแบบเรียลไทม์ทันทีเมื่อกราฟเข้าเงื่อนไข (ไม่ต้องรอจบแท่ง 1 นาที)
-            </label>
-            <p className="mt-1 text-xs text-[#94A3B8]">
-              เมื่อแท่งล่าสุดไหลเข้าเงื่อนไข ระบบจะส่งสัญญาณแจ้งเตือนทันทีโดยไม่รอให้ครบ 60 วินาที เพื่อให้คุณมีเวลาวิเคราะห์และตัดสินใจก่อนเข้าเทรด
-            </p>
-          </div>
 
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <label
-                htmlFor="sound-toggle"
-                className="text-sm font-medium text-[#F1F5F9] flex items-center gap-2 cursor-pointer"
-              >
-                <input
-                  id="sound-toggle"
-                  type="checkbox"
-                  checked={draft.soundEnabled}
-                  onChange={(e) =>
-                    setDraft((prev) => ({
-                      ...prev,
-                      soundEnabled: e.target.checked,
-                    }))
-                  }
-                  className="w-4 h-4 accent-[#3B82F6] rounded cursor-pointer"
-                />
-                เปิดเสียงแจ้งเตือนดังชัดเจนอัตโนมัติเมื่อพบกราฟเข้าเงื่อนไข
-              </label>
-              <p className="mt-1 text-xs text-[#94A3B8]">
-                ส่งเสียงสัญญาณแบบหลายจังหวะทันทีเมื่อพบชุดเทรนด์ไหล{' '}
-                {draft.targetMinCandles === draft.targetMaxCandles
-                  ? `${draft.targetMinCandles}`
-                  : `${draft.targetMinCandles}–${draft.targetMaxCandles}`}{' '}
-                แท่ง
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() =>
-                playTrendAlertChime('UP', draft.soundVolume, draft.soundDurationMode)
-              }
-              className="px-4 py-2 text-xs font-medium rounded-lg bg-[#162033] hover:bg-[#1E2B44] border border-[#273652] text-[#E2E8F0] inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Volume2 className="w-4 h-4 text-[#16C784]" />
-              ทดสอบเสียงแจ้งเตือน
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2 border-t border-[#162033]">
-            <div>
-              <label
-                htmlFor="sound-volume"
-                className="block text-xs font-medium text-[#CBD5E1]"
-              >
-                ความดังของเสียงแจ้งเตือน
-              </label>
-              <div className="mt-2 flex items-center gap-4">
-                <input
-                  id="sound-volume"
-                  type="range"
-                  min={20}
-                  max={100}
-                  step={5}
-                  value={Math.round(draft.soundVolume * 100)}
-                  onChange={(e) =>
-                    setDraft((prev) => ({
-                      ...prev,
-                      soundVolume: Number(e.target.value) / 100,
-                    }))
-                  }
-                  className="flex-1 accent-[#3B82F6] cursor-pointer"
-                />
-                <span className="w-16 text-right text-sm font-mono-tabular text-[#F8FAFC]">
-                  {Math.round(draft.soundVolume * 100)}%
-                </span>
-              </div>
-            </div>
-
-            <div>
-              <span className="block text-xs font-medium text-[#CBD5E1]">
-                ความยาวของเสียงแจ้งเตือน
-              </span>
-              <div className="mt-2 flex items-center p-1 bg-[#0B111E] border border-[#1E293B] rounded-lg">
-                <button
-                  type="button"
-                  onClick={() =>
-                    setDraft((prev) => ({ ...prev, soundDurationMode: 'STANDARD' }))
-                  }
-                  className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                    draft.soundDurationMode === 'STANDARD'
-                      ? 'bg-[#1D2A42] text-[#F8FAFC]'
-                      : 'text-[#94A3B8] hover:text-[#E2E8F0]'
-                  }`}
-                >
-                  2 รอบ (~2.2 วิ)
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    setDraft((prev) => ({ ...prev, soundDurationMode: 'LONG' }))
-                  }
-                  className={`flex-1 py-1.5 px-3 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                    draft.soundDurationMode === 'LONG'
-                      ? 'bg-[#1D2A42] text-[#F8FAFC]'
-                      : 'text-[#94A3B8] hover:text-[#E2E8F0]'
-                  }`}
-                >
-                  ยาวพิเศษ 3 รอบ (~3.6 วิ)
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
 
         {/* Footer Actions */}
         <div className="p-5 flex flex-wrap items-center justify-between gap-4 bg-[#0B111E] rounded-b-xl">

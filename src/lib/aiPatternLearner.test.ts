@@ -5,6 +5,7 @@ import {
   buildAiPatternModel,
   createFeedbackSample,
   parseImportedAiSamples,
+  scoreCandlesForAiRanking,
   scorePatternWithAi,
 } from './aiPatternLearner.ts';
 import { analyzeCandleTrend, calculateEMA } from './trendDetector.ts';
@@ -102,7 +103,13 @@ test('buildAiPatternModel computes centroid and preferred summary from PASS samp
   assert.ok(model.preferredSummary !== null);
   assert.equal(model.preferredSummary!.idealRunLength, 5);
   assert.equal(model.preferredSummary!.idealWickPercent, 16);
+  assert.equal(model.preferredSummary!.maxWickPercent, 18);
   assert.equal(model.preferredSummary!.idealUniformity, 88);
+  assert.equal(model.preferredSummary!.minUniformity, 86);
+  assert.ok((model.preferredSummary!.idealAlignment ?? 0) >= 85);
+  assert.ok((model.preferredSummary!.minAlignment ?? 0) >= 85);
+  assert.equal(model.preferredSummary!.minBodyRatio, 1.0);
+  assert.equal(model.preferredSummary!.maxBodyRatio, 1.1);
 });
 
 test('scorePatternWithAi rewards patterns matching PASS samples and penalizes REJECT patterns', () => {
@@ -292,6 +299,21 @@ test('assessChartFlowForAiTraining strictly rejects sideways choppy charts even 
     'DOWN'
   );
   assert.equal(forcedDown.ok, false);
+
+  // User-judged REJECT is allowed even on choppy charts so AI learns what to filter out
+  const userReject = assessChartFlowForAiTraining(
+    sidewaysCandles,
+    ema,
+    DEFAULT_SCANNER_CONFIG,
+    'UP',
+    'REJECT'
+  );
+  assert.equal(userReject.ok, true);
+  if (userReject.ok) {
+    assert.ok(Number.isFinite(userReject.avgBodyToMedianRatio));
+    assert.ok(Number.isFinite(userReject.avgWickRatio));
+    assert.ok(Number.isFinite(userReject.uniformityScore));
+  }
 });
 
 test('parseImportedAiSamples filters valid UP/DOWN samples and rejects malformed JSON payloads', () => {
@@ -361,5 +383,94 @@ test('supports storing and importing more than 500 AI training samples (up to 20
 
   const imported = parseImportedAiSamples(JSON.stringify({ samples: manySamples }));
   assert.equal(imported.length, 650);
+});
+
+test('scorePatternWithAi prioritizes candle body size, wick length, and uniformity specs taught by user', () => {
+  const taughtPass = createFeedbackSample({
+    assetId: 'EURUSD-OTC',
+    assetName: 'EUR/USD (OTC)',
+    direction: 'UP',
+    verdict: 'PASS',
+    baseMatchScore: 91,
+    runLength: 5,
+    avgWickRatio: 0.11,
+    uniformityScore: 91,
+    features: {
+      runLengthNorm: 5 / 6,
+      avgWickRatio: 0.11,
+      reverseWickRatio: 0.06,
+      uniformityScoreNorm: 0.91,
+      avgBodyToMedianRatio: 0.95,
+      bodyTrendSlope: 1.0,
+      directionalEfficiency: 0.88,
+      emaDistanceRatio: 0.75,
+      swingScoreNorm: 0.96,
+    },
+  });
+  const model = buildAiPatternModel([taughtPass]);
+
+  // Same 3 pillars (body 0.96x, wick 12%, uniformity 90%) -> very high similarity even if runLength differs
+  const matchingThreePillars: PatternFeatureVector = {
+    runLengthNorm: 4 / 6,
+    avgWickRatio: 0.12,
+    reverseWickRatio: 0.07,
+    uniformityScoreNorm: 0.9,
+    avgBodyToMedianRatio: 0.96,
+    bodyTrendSlope: 1.0,
+    directionalEfficiency: 0.86,
+    emaDistanceRatio: 0.8,
+    swingScoreNorm: 0.94,
+  };
+  // Mismatched 3 pillars (oversized body 1.9x, long wick 36%, low uniformity 58%)
+  const mismatchedThreePillars: PatternFeatureVector = {
+    runLengthNorm: 5 / 6,
+    avgWickRatio: 0.36,
+    reverseWickRatio: 0.08,
+    uniformityScoreNorm: 0.58,
+    avgBodyToMedianRatio: 1.9,
+    bodyTrendSlope: 1.0,
+    directionalEfficiency: 0.88,
+    emaDistanceRatio: 0.75,
+    swingScoreNorm: 0.95,
+  };
+
+  const goodRes = scorePatternWithAi(matchingThreePillars, model, [taughtPass], 35);
+  const badRes = scorePatternWithAi(mismatchedThreePillars, model, [taughtPass], 35);
+
+  assert.ok((goodRes.aiSimilarityScore ?? 0) >= 85);
+  assert.ok(goodRes.aiDeltaScore > 0);
+  assert.ok((badRes.aiSimilarityScore ?? 100) < 50);
+  assert.ok(badRes.aiDeltaScore < 0);
+});
+
+test('assessChartFlowForAiTraining always learns strictly from the latest 4-6 candles even on longer 8-bar runs', () => {
+  const longFlow = buildUniformTrendCandles({
+    bodies: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001],
+    upperWick: 0.00008,
+    lowerWick: 0.00008,
+  });
+  const ema = calculateEMA(longFlow, 7);
+  const res = assessChartFlowForAiTraining(longFlow, ema, {
+    targetMinCandles: 3,
+    targetMaxCandles: 8,
+    scanWindowBars: 15,
+  });
+  assert.equal(res.ok, true);
+  if (res.ok) {
+    assert.ok(res.runLength >= 4 && res.runLength <= 6);
+    assert.ok(res.alignmentScore >= 85);
+  }
+});
+
+test('scoreCandlesForAiRanking returns undefined until user teaches AI manually', () => {
+  const clean = buildUniformTrendCandles({
+    bodies: [0.001, 0.001, 0.001, 0.001, 0.001],
+  });
+  const ema = calculateEMA(clean, 7);
+  const emptyModel = buildAiPatternModel([]);
+  assert.equal(
+    scoreCandlesForAiRanking(clean, ema, undefined, 0, undefined, emptyModel, []),
+    undefined
+  );
 });
 

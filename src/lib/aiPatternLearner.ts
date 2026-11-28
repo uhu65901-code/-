@@ -22,15 +22,15 @@ const FEATURE_KEYS: Array<keyof PatternFeatureVector> = [
 ];
 
 const FEATURE_SCALES: Record<keyof PatternFeatureVector, number> = {
-  runLengthNorm: 0.3,
-  avgWickRatio: 0.12,
-  reverseWickRatio: 0.18,
-  uniformityScoreNorm: 0.14,
-  avgBodyToMedianRatio: 0.35,
-  bodyTrendSlope: 0.32,
-  directionalEfficiency: 0.15,
-  emaDistanceRatio: 0.6,
-  swingScoreNorm: 0.14,
+  runLengthNorm: 0.34,
+  avgWickRatio: 0.1,
+  reverseWickRatio: 0.16,
+  uniformityScoreNorm: 0.12,
+  avgBodyToMedianRatio: 0.28,
+  bodyTrendSlope: 0.36,
+  directionalEfficiency: 0.16,
+  emaDistanceRatio: 0.65,
+  swingScoreNorm: 0.15,
 };
 
 function clamp(val: number, min: number, max: number): number {
@@ -39,16 +39,24 @@ function clamp(val: number, min: number, max: number): number {
 
 function defaultWeights(): Record<keyof PatternFeatureVector, number> {
   return {
-    runLengthNorm: 1.0,
-    avgWickRatio: 1.25,
-    reverseWickRatio: 1.2,
-    uniformityScoreNorm: 1.3,
-    avgBodyToMedianRatio: 1.2,
-    bodyTrendSlope: 0.95,
-    directionalEfficiency: 1.25,
-    emaDistanceRatio: 1.0,
-    swingScoreNorm: 1.25,
+    // Primary 3 pillars taught by user (latest 4-6 bars): uniformity, wick amount, candle alignment
+    uniformityScoreNorm: 2.2,
+    avgWickRatio: 2.2,
+    swingScoreNorm: 2.2,
+    directionalEfficiency: 1.8,
+    avgBodyToMedianRatio: 1.6,
+    reverseWickRatio: 1.4,
+    // Supporting flow context
+    runLengthNorm: 0.8,
+    bodyTrendSlope: 0.8,
+    emaDistanceRatio: 0.7,
   };
+}
+
+export function computeFeatureAlignmentPct(features: PatternFeatureVector): number {
+  const swing = clamp(features.swingScoreNorm, 0, 1);
+  const eff = clamp(features.directionalEfficiency, 0, 1);
+  return Math.round((swing * 0.6 + eff * 0.4) * 100);
 }
 
 export function extractPatternFeatures(params: {
@@ -170,15 +178,26 @@ export function buildAiPatternModel(samples: PatternFeedbackSample[]): AiPattern
     }
   }
 
-  const preferredSummary =
-    passCentroid && passSamples.length > 0
-      ? {
-          idealRunLength: Number((passCentroid.runLengthNorm * 6).toFixed(1)),
-          idealWickPercent: Math.round(passCentroid.avgWickRatio * 100),
-          idealUniformity: Math.round(passCentroid.uniformityScoreNorm * 100),
-          idealBodyRatio: Number(passCentroid.avgBodyToMedianRatio.toFixed(2)),
-        }
-      : null;
+  let preferredSummary: AiPatternModel['preferredSummary'] = null;
+  if (passCentroid && passSamples.length > 0) {
+    const bodyRatios = passSamples.map((s) => s.features.avgBodyToMedianRatio);
+    const wickRatios = passSamples.map((s) => s.features.avgWickRatio);
+    const uniformities = passSamples.map((s) => Math.round(s.features.uniformityScoreNorm * 100));
+    const alignments = passSamples.map((s) => computeFeatureAlignmentPct(s.features));
+
+    preferredSummary = {
+      idealRunLength: Number((passCentroid.runLengthNorm * 6).toFixed(1)),
+      idealWickPercent: Math.round(passCentroid.avgWickRatio * 100),
+      maxWickPercent: Math.round(Math.max(...wickRatios) * 100),
+      idealUniformity: Math.round(passCentroid.uniformityScoreNorm * 100),
+      minUniformity: Math.min(...uniformities),
+      idealAlignment: computeFeatureAlignmentPct(passCentroid),
+      minAlignment: Math.min(...alignments),
+      idealBodyRatio: Number(passCentroid.avgBodyToMedianRatio.toFixed(2)),
+      minBodyRatio: Number(Math.min(...bodyRatios).toFixed(2)),
+      maxBodyRatio: Number(Math.max(...bodyRatios).toFixed(2)),
+    };
+  }
 
   return {
     passCount: passSamples.length,
@@ -208,6 +227,32 @@ function rbfSimilarity(
   return Math.exp(-0.55 * normalizedDistSq) * 100;
 }
 
+/**
+ * Compares the 3 user-taught pillars across the latest 4-6 candles:
+ * 1) Candle uniformity & body consistency
+ * 2) Wick amount & counter-wick cleanliness
+ * 3) Candle staircase alignment & directional smoothness
+ */
+function threePillarSimilarity(
+  a: PatternFeatureVector,
+  b: PatternFeatureVector
+): number {
+  const unifDiff = (a.uniformityScoreNorm - b.uniformityScoreNorm) / 0.12;
+  const bodyDiff = (a.avgBodyToMedianRatio - b.avgBodyToMedianRatio) / 0.28;
+  const uniformityPillarSq = unifDiff * unifDiff * 0.65 + bodyDiff * bodyDiff * 0.35;
+
+  const wickDiff = (a.avgWickRatio - b.avgWickRatio) / 0.1;
+  const revWickDiff = (a.reverseWickRatio - b.reverseWickRatio) / 0.16;
+  const wickPillarSq = wickDiff * wickDiff * 0.72 + revWickDiff * revWickDiff * 0.28;
+
+  const swingDiff = (a.swingScoreNorm - b.swingScoreNorm) / 0.14;
+  const effDiff = (a.directionalEfficiency - b.directionalEfficiency) / 0.15;
+  const alignmentPillarSq = swingDiff * swingDiff * 0.6 + effDiff * effDiff * 0.4;
+
+  const distSq = (uniformityPillarSq + wickPillarSq + alignmentPillarSq) / 3;
+  return Math.exp(-0.55 * distSq) * 100;
+}
+
 export function scorePatternWithAi(
   features: PatternFeatureVector,
   model: AiPatternModel,
@@ -222,65 +267,78 @@ export function scorePatternWithAi(
     return { aiSimilarityScore: undefined, aiDeltaScore: 0 };
   }
 
-  const strength = clamp(influencePercent / 35, 0, 1.75);
+  const strength = clamp(influencePercent / 35, 0, 1.85);
   const passSamples = samples.filter((s) => s.verdict === 'PASS' && s.features);
   const rejectSamples = samples.filter((s) => s.verdict === 'REJECT' && s.features);
 
   let simPass = 65;
   if (model.passCentroid && passSamples.length > 0) {
-    const centroidSim = rbfSimilarity(features, model.passCentroid, model.featureWeights);
-    let nearestSim = 0;
+    const centroidFullSim = rbfSimilarity(features, model.passCentroid, model.featureWeights);
+    const centroidPillarSim = threePillarSimilarity(features, model.passCentroid);
+    let nearestFull = 0;
+    let nearestPillar = 0;
     for (const s of passSamples.slice(-300)) {
-      const sim = rbfSimilarity(features, s.features, model.featureWeights);
-      if (sim > nearestSim) nearestSim = sim;
+      const full = rbfSimilarity(features, s.features, model.featureWeights);
+      const pillar = threePillarSimilarity(features, s.features);
+      if (full > nearestFull) nearestFull = full;
+      if (pillar > nearestPillar) nearestPillar = pillar;
     }
-    simPass = centroidSim * 0.55 + nearestSim * 0.45;
+    const pillarScore = centroidPillarSim * 0.45 + nearestPillar * 0.55;
+    const fullScore = centroidFullSim * 0.45 + nearestFull * 0.55;
+    // Emphasize 3 taught traits (body size, wick length, uniformity)
+    simPass = pillarScore * 0.62 + fullScore * 0.38;
   }
 
   let simReject = 0;
   if (model.rejectCentroid && rejectSamples.length > 0) {
-    const centroidRej = rbfSimilarity(features, model.rejectCentroid, model.featureWeights);
-    let nearestRej = 0;
+    const centroidRejFull = rbfSimilarity(features, model.rejectCentroid, model.featureWeights);
+    const centroidRejPillar = threePillarSimilarity(features, model.rejectCentroid);
+    let nearestRejFull = 0;
+    let nearestRejPillar = 0;
     for (const s of rejectSamples.slice(-300)) {
-      const sim = rbfSimilarity(features, s.features, model.featureWeights);
-      if (sim > nearestRej) nearestRej = sim;
+      const full = rbfSimilarity(features, s.features, model.featureWeights);
+      const pillar = threePillarSimilarity(features, s.features);
+      if (full > nearestRejFull) nearestRejFull = full;
+      if (pillar > nearestRejPillar) nearestRejPillar = pillar;
     }
-    simReject = centroidRej * 0.5 + nearestRej * 0.5;
+    const rejPillar = centroidRejPillar * 0.4 + nearestRejPillar * 0.6;
+    const rejFull = centroidRejFull * 0.4 + nearestRejFull * 0.6;
+    simReject = rejPillar * 0.62 + rejFull * 0.38;
   }
 
   let aiSimilarityScore: number;
   let rawDelta = 0;
 
   if (model.passCount > 0 && model.rejectCount > 0) {
-    aiSimilarityScore = Math.round(clamp(simPass - Math.max(0, simReject - 45) * 0.45, 0, 100));
-    if (simReject > simPass + 8 && simReject >= 62) {
-      rawDelta = -Math.round(clamp(((simReject - simPass) / 35) * 10, 4, 14) * strength);
-    } else if (aiSimilarityScore >= 78) {
-      rawDelta = Math.round(clamp(((aiSimilarityScore - 72) / 28) * 9, 2, 10) * strength);
+    aiSimilarityScore = Math.round(clamp(simPass - Math.max(0, simReject - 42) * 0.48, 0, 100));
+    if (simReject > simPass + 6 && simReject >= 62) {
+      rawDelta = -Math.round(clamp(((simReject - simPass) / 30) * 12, 5, 18) * strength);
+    } else if (aiSimilarityScore >= 76) {
+      rawDelta = Math.round(clamp(((aiSimilarityScore - 70) / 30) * 12, 3, 14) * strength);
     } else if (aiSimilarityScore < 52) {
-      rawDelta = -Math.round(clamp(((58 - aiSimilarityScore) / 30) * 8, 2, 9) * strength);
+      rawDelta = -Math.round(clamp(((58 - aiSimilarityScore) / 30) * 9, 3, 12) * strength);
     }
   } else if (model.passCount > 0) {
     aiSimilarityScore = Math.round(clamp(simPass, 0, 100));
-    if (aiSimilarityScore >= 76) {
-      rawDelta = Math.round(clamp(((aiSimilarityScore - 70) / 30) * 9, 2, 10) * strength);
+    if (aiSimilarityScore >= 75) {
+      rawDelta = Math.round(clamp(((aiSimilarityScore - 68) / 32) * 12, 3, 14) * strength);
     } else if (aiSimilarityScore < 50) {
-      rawDelta = -Math.round(clamp(((56 - aiSimilarityScore) / 32) * 7, 2, 8) * strength);
+      rawDelta = -Math.round(clamp(((56 - aiSimilarityScore) / 32) * 8, 2, 10) * strength);
     }
   } else {
-    aiSimilarityScore = Math.round(clamp(100 - simReject * 0.8, 0, 100));
-    if (simReject >= 68) {
-      rawDelta = -Math.round(clamp(((simReject - 60) / 35) * 10, 3, 12) * strength);
+    aiSimilarityScore = Math.round(clamp(100 - simReject * 0.85, 0, 100));
+    if (simReject >= 65) {
+      rawDelta = -Math.round(clamp(((simReject - 58) / 32) * 12, 4, 16) * strength);
     }
   }
 
   let aiLabel: string;
   if (rawDelta >= 3 || aiSimilarityScore >= 82) {
-    aiLabel = `AI ชอบทรงนี้ ${aiSimilarityScore}%`;
+    aiLabel = `ตรงสเปก 4–6 แท่งที่สอน AI (สม่ำเสมอ·ไส้·เรียงตัว) ${aiSimilarityScore}%`;
   } else if (rawDelta <= -4 || aiSimilarityScore < 55) {
-    aiLabel = `ต่างจากทรงที่สอน AI (${aiSimilarityScore}%)`;
+    aiLabel = `ต่างจากสเปก 4–6 แท่งที่สอน AI (${aiSimilarityScore}%)`;
   } else {
-    aiLabel = `คล้ายทรงที่สอน AI ${aiSimilarityScore}%`;
+    aiLabel = `คล้าย 4–6 แท่งที่สอน AI ${aiSimilarityScore}%`;
   }
 
   return {
@@ -317,6 +375,8 @@ export type FlowAiAssessment =
       runLength: number;
       avgWickRatio: number;
       uniformityScore: number;
+      alignmentScore: number;
+      avgBodyToMedianRatio: number;
       baseMatchScore: number;
       directionalEfficiency: number;
       features: PatternFeatureVector;
@@ -336,8 +396,11 @@ function computeMedian(values: number[]): number {
 }
 
 /**
- * Validates that a chart's recent candles form a genuine flowing UP or DOWN trend
- * (never sideways consolidation) before allowing AI pattern learning.
+ * Strictly extracts flowing-candle traits from the latest 4–6 candles in the M15 window:
+ * 1) Uniformity of candle bodies
+ * 2) Wick amount
+ * 3) Staircase alignment & directional ordering
+ * Only called from explicit user teach actions (PASS/REJECT) or read-only ranking evaluation.
  */
 export function assessChartFlowForAiTraining(
   candles: Candle[],
@@ -345,12 +408,13 @@ export function assessChartFlowForAiTraining(
   config: Pick<ScannerConfig, 'targetMinCandles' | 'targetMaxCandles'> & {
     scanWindowBars?: number;
   },
-  forcedDirection?: TrendDirection
+  forcedDirection?: TrendDirection,
+  verdict: PatternVerdict = 'PASS'
 ): FlowAiAssessment {
-  if (candles.length < 8) {
+  if (candles.length < 4) {
     return {
       ok: false,
-      reason: 'ข้อมูลแท่งเทียน M15 ยังไม่เพียงพอสำหรับสอน AI (ต้องมีอย่างน้อย 8 แท่ง)',
+      reason: 'ข้อมูลแท่งเทียน M15 ยังไม่เพียงพอสำหรับสอน AI (ต้องมีอย่างน้อย 4 แท่ง)',
     };
   }
 
@@ -378,7 +442,7 @@ export function assessChartFlowForAiTraining(
     if (latestDiff > 0) targetDir = 'UP';
     else if (latestDiff < 0) targetDir = 'DOWN';
     else {
-      const lookWindow = m15Candles.slice(-Math.max(3, config.targetMinCandles));
+      const lookWindow = m15Candles.slice(-4);
       const net = lookWindow[lookWindow.length - 1].close - lookWindow[0].open;
       if (Math.abs(net) > medianBody * 0.8) {
         targetDir = net > 0 ? 'UP' : 'DOWN';
@@ -393,8 +457,9 @@ export function assessChartFlowForAiTraining(
     };
   }
 
-  const maxInspect = Math.min(m15Candles.length, Math.max(4, config.targetMaxCandles));
-  const minInspect = Math.min(m15Candles.length, Math.max(3, config.targetMinCandles));
+  // Strictly enforce latest 4-6 candles for AI learning
+  const minInspect = Math.min(m15Candles.length, 4);
+  const maxInspect = Math.min(m15Candles.length, 6);
 
   let bestIndices: number[] | null = null;
   let bestScore = -1;
@@ -432,7 +497,7 @@ export function assessChartFlowForAiTraining(
     }
   }
 
-  // Also check pure contiguous run from latest bar inside M15 window
+  // Check pure contiguous run from latest bar capped strictly at 6 bars (latest 4-6 bars)
   const runIndices: number[] = [];
   for (let offset = 0; offset < maxInspect; offset++) {
     const idx = m15Candles.length - 1 - offset;
@@ -445,15 +510,21 @@ export function assessChartFlowForAiTraining(
     }
   }
   const chosenIndices =
-    runIndices.length >= 3 && (!bestIndices || runIndices.length >= minInspect)
-      ? runIndices
-      : bestIndices;
+    runIndices.length >= 4
+      ? runIndices.slice(-6)
+      : bestIndices ??
+        (verdict === 'REJECT'
+          ? Array.from(
+              { length: minInspect },
+              (_, i) => m15Candles.length - minInspect + i
+            )
+          : null);
 
-  if (!chosenIndices || chosenIndices.length < 3) {
+  if (!chosenIndices || chosenIndices.length < 4) {
     return {
       ok: false,
       reason:
-        'กราฟนี้ยังเป็นไซด์เวย์/สลับสีในกรอบ M15 — AI จะเรียนรู้เฉพาะกราฟไหลเป็นเทรนด์ขึ้นหรือเทรนด์ลงเท่านั้น',
+        'กราฟ 4–6 แท่งล่าสุดยังเป็นไซด์เวย์/สลับสี — หากไม่ต้องการทรงแบบนี้กดปุ่ม "ไม่ผ่าน" เพื่อให้ AI จดจำได้',
     };
   }
 
@@ -485,37 +556,71 @@ export function assessChartFlowForAiTraining(
     }
   }
 
-  const minSameNeeded = Math.max(3, Math.ceil(runCandles.length * 0.72));
+  const minSameNeeded = verdict === 'REJECT' ? 1 : Math.max(3, Math.ceil(runCandles.length * 0.65));
   if (
-    netMove < medianBody * 1.45 ||
-    directionalEfficiency < 0.58 ||
-    sameDirCount < minSameNeeded
+    verdict === 'PASS' &&
+    (netMove < medianBody * 0.9 ||
+      directionalEfficiency < 0.45 ||
+      sameDirCount < minSameNeeded)
   ) {
     return {
       ok: false,
       reason:
-        'กราฟนี้ยังเป็นไซด์เวย์หรือไม่ไหลตามทิศทางชัดเจนในกรอบ M15 — AI จะเรียนรู้เฉพาะกราฟไหลเป็นเทรนด์ขึ้นหรือเทรนด์ลงเท่านั้น',
+        'กราฟ 4–6 แท่งล่าสุดยังแกว่งไซด์เวย์ไม่เรียงตัวสวย — หากไม่ชอบทรงนี้กดปุ่ม "ไม่ผ่าน" เพื่อให้ AI จดจำได้',
     };
   }
 
   const avgWickRatio = wickRatioSum / runCandles.length;
   const meanBody =
-    sameBodies.reduce((s, v) => s + v, 0) / Math.max(1, sameBodies.length);
+    sameBodies.length > 0
+      ? sameBodies.reduce((s, v) => s + v, 0) / sameBodies.length
+      : medianBody;
   const variance =
-    sameBodies.reduce((s, v) => s + (v - meanBody) ** 2, 0) /
-    Math.max(1, sameBodies.length);
+    sameBodies.length > 0
+      ? sameBodies.reduce((s, v) => s + (v - meanBody) ** 2, 0) / sameBodies.length
+      : 0;
   const cv = meanBody > 0 ? Math.sqrt(variance) / meanBody : 1;
   const uniformityScore = Math.round(clamp((1 - cv) * 100, 0, 100));
   const avgBodyToMedianRatio = meanBody / medianBody;
-  const swingScore = Math.round(
-    clamp((sameDirCount / runCandles.length) * 65 + directionalEfficiency * 35, 0, 100)
-  );
+
+  // Step-by-step candle staircase alignment score
+  let smoothSteps = 0;
+  let totalSteps = 0;
+  for (let i = 1; i < runCandles.length; i++) {
+    const prev = runCandles[i - 1];
+    const curr = runCandles[i];
+    const prevMid = (prev.open + prev.close) / 2;
+    totalSteps++;
+    const currSameDir = targetDir === 'UP' ? curr.close > curr.open : curr.close < curr.open;
+    if (!currSameDir) {
+      const noCounterSwing =
+        targetDir === 'UP'
+          ? curr.low >= prevMid - medianBody * 0.25
+          : curr.high <= prevMid + medianBody * 0.25;
+      if (noCounterSwing) smoothSteps++;
+      continue;
+    }
+    if (targetDir === 'UP') {
+      const closesHigher = curr.close > prev.close - medianBody * 0.08;
+      const opensClean = curr.open >= prev.open - medianBody * 0.22;
+      const noDeepSwing = curr.low >= Math.min(prev.open, prevMid) - medianBody * 0.24;
+      if (closesHigher && opensClean && noDeepSwing) smoothSteps++;
+    } else {
+      const closesLower = curr.close < prev.close + medianBody * 0.08;
+      const opensClean = curr.open <= prev.open + medianBody * 0.22;
+      const noDeepSwing = curr.high <= Math.max(prev.open, prevMid) + medianBody * 0.24;
+      if (closesLower && opensClean && noDeepSwing) smoothSteps++;
+    }
+  }
+  const swingScore =
+    totalSteps > 0 ? Math.round((smoothSteps / totalSteps) * 100) : 100;
+
   const baseMatchScore = Math.round(
     clamp(
-      uniformityScore * 0.3 +
-        (100 - avgWickRatio * 70) * 0.22 +
-        directionalEfficiency * 100 * 0.28 +
-        swingScore * 0.2,
+      uniformityScore * 0.34 +
+        (100 - avgWickRatio * 70) * 0.28 +
+        directionalEfficiency * 100 * 0.2 +
+        swingScore * 0.18,
       0,
       100
     )
@@ -540,10 +645,53 @@ export function assessChartFlowForAiTraining(
     runLength: runCandles.length,
     avgWickRatio,
     uniformityScore,
+    alignmentScore: computeFeatureAlignmentPct(features),
+    avgBodyToMedianRatio,
     baseMatchScore,
     directionalEfficiency,
     features,
   };
+}
+
+/**
+ * Evaluates an asset's latest 4-6 candles against the user-trained AI model
+ * for self-improving tie-break ordering in the ranking table.
+ * Returns undefined if the user has not taught AI any samples yet.
+ */
+export function scoreCandlesForAiRanking(
+  candles: Candle[],
+  emaValues: number[],
+  existingFeatures: PatternFeatureVector | undefined,
+  existingRunLength: number,
+  existingAiSimilarity: number | undefined,
+  model: AiPatternModel,
+  samples: PatternFeedbackSample[]
+): number | undefined {
+  if (model.passCount === 0 && model.rejectCount === 0) {
+    return undefined;
+  }
+  if (
+    existingAiSimilarity !== undefined &&
+    existingRunLength >= 4 &&
+    existingRunLength <= 6
+  ) {
+    return existingAiSimilarity;
+  }
+  if (existingFeatures && existingRunLength >= 4 && existingRunLength <= 6) {
+    return scorePatternWithAi(existingFeatures, model, samples, 35).aiSimilarityScore;
+  }
+  if (candles.length < 4) return undefined;
+  const last = candles[candles.length - 1];
+  const fallbackDir: TrendDirection = last.close >= last.open ? 'UP' : 'DOWN';
+  const assessed = assessChartFlowForAiTraining(
+    candles,
+    emaValues,
+    { targetMinCandles: 4, targetMaxCandles: 6, scanWindowBars: 15 },
+    fallbackDir,
+    'REJECT'
+  );
+  if (!assessed.ok) return undefined;
+  return scorePatternWithAi(assessed.features, model, samples, 35).aiSimilarityScore;
 }
 
 export function parseImportedAiSamples(rawJson: string): PatternFeedbackSample[] {

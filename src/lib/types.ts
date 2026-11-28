@@ -30,6 +30,28 @@ export interface AssetInfo {
 
 export const MAX_AI_TRAINING_SAMPLES = 2000;
 
+export interface CandleBodyDisplayConfig {
+  mode: 'RANGE' | 'FIXED';
+  minBars: number; // 2..8
+  maxBars: number; // 2..10
+  fixedBars: number; // 2..10
+  avgMode: 'SYNC' | 'RANGE' | 'FIXED';
+  avgMinBars: number; // 2..8
+  avgMaxBars: number; // 2..10
+  avgFixedBars: number; // 2..10
+}
+
+export const DEFAULT_CANDLE_BODY_CONFIG: CandleBodyDisplayConfig = {
+  mode: 'RANGE',
+  minBars: 5,
+  maxBars: 6,
+  fixedBars: 6,
+  avgMode: 'SYNC',
+  avgMinBars: 5,
+  avgMaxBars: 6,
+  avgFixedBars: 6,
+};
+
 export interface ScannerConfig {
   scanWindowBars: number; // default 15 (M15: 15-20 candles max for clear trend visibility)
   targetMinCandles: number; // default 4 (compare latest 4-6 candles)
@@ -37,10 +59,10 @@ export interface ScannerConfig {
   maxWickRatio: number; // default 0.25 (allow small natural wicks up to 25%)
   minUniformityScore: number; // default 76 (0..100 crisp uniform candle sizes)
   minMatchScore: number; // default 86 (0..100 balanced threshold so qualifying charts alert promptly)
-  maxCounterCandles: number; // default 0 (0 = strictly same color, 1 = optional)
+  maxCounterCandles: number; // default 2 (allow 1-2 pullback bars in 5-6 candle trend)
   maxBodyToMedianRatio: number; // default 1.65 (prevents oversized spike bars)
   minBodyToMedianRatio: number; // default 0.42 (prevents dead flat bars)
-  realtimeAlertImmediate: boolean; // default true (alert immediately mid-bar without waiting for close)
+  realtimeAlertImmediate: boolean; // default false (update after candle closes)
   aiLearningEnabled: boolean; // default true (adaptive pattern scoring from user PASS/REJECT clicks)
   aiInfluencePercent: number; // default 35 (0..60 weight of AI pattern similarity adjustment)
   directionFilter: 'BOTH' | TrendDirection;
@@ -49,6 +71,9 @@ export interface ScannerConfig {
   soundVolume: number; // 0.2..1.0 (default 0.95)
   soundDurationMode: SoundDurationMode; // default 'LONG'
   includeFormingInList: boolean;
+  rankRefreshIntervalSec: number; // default 60
+  candleBodyDisplay?: CandleBodyDisplayConfig;
+  candleWickDisplay?: CandleBodyDisplayConfig;
 }
 
 export interface PatternFeatureVector {
@@ -90,8 +115,14 @@ export interface AiPatternModel {
   preferredSummary: {
     idealRunLength: number;
     idealWickPercent: number;
+    maxWickPercent?: number;
     idealUniformity: number;
+    minUniformity?: number;
+    idealAlignment?: number;
+    minAlignment?: number;
     idealBodyRatio: number;
+    minBodyRatio?: number;
+    maxBodyRatio?: number;
   } | null;
 }
 
@@ -174,16 +205,19 @@ export const DEFAULT_SCANNER_CONFIG: ScannerConfig = {
   maxWickRatio: 0.25,
   minUniformityScore: 76,
   minMatchScore: 86,
-  maxCounterCandles: 0,
+  maxCounterCandles: 2,
   maxBodyToMedianRatio: 1.65,
   minBodyToMedianRatio: 0.42,
-  realtimeAlertImmediate: true,
+  realtimeAlertImmediate: false,
   aiLearningEnabled: true,
   aiInfluencePercent: 35,
   directionFilter: 'BOTH',
   categoryFilter: 'ALL',
-  soundEnabled: true,
+  soundEnabled: false,
   soundVolume: 0.95,
   soundDurationMode: 'LONG',
   includeFormingInList: true,
+  rankRefreshIntervalSec: 60,
+  candleBodyDisplay: { ...DEFAULT_CANDLE_BODY_CONFIG },
+  candleWickDisplay: { ...DEFAULT_CANDLE_BODY_CONFIG },
 };
